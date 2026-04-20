@@ -6,13 +6,21 @@ Run with: streamlit run main.py
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import PyPDF2
 import io
 import json
 import os
 import pandas as pd
+import secrets as secrets_module
 from dotenv import load_dotenv
-from salesforce_client import SalesforceOrgScanner
+from salesforce_client import (
+    SalesforceOrgScanner,
+    get_authorization_url,
+    exchange_code_for_token,
+    revoke_token,
+    generate_pkce_pair
+)
 from ai_analyzer import AIAnalyzer
 from pattern_matcher import PatternMatcher
 from report_generator import ReportGenerator
@@ -21,6 +29,89 @@ from field_analyzer import FieldUsageAnalyzer
 # Load environment variables
 load_dotenv()
 
+# ============================================================================
+# PKCE Storage Helpers (file-based for persistence across OAuth redirects)
+# ============================================================================
+
+PKCE_STORAGE_FILE = '.pkce_storage.json'
+
+def save_pkce_verifier(session_id, verifier):
+    """Save PKCE verifier to file storage keyed by session ID."""
+    try:
+        # Load existing storage
+        if os.path.exists(PKCE_STORAGE_FILE):
+            with open(PKCE_STORAGE_FILE, 'r') as f:
+                storage = json.load(f)
+        else:
+            storage = {}
+        
+        # Save verifier with timestamp for cleanup
+        import time
+        storage[session_id] = {
+            'verifier': verifier,
+            'timestamp': time.time()
+        }
+        
+        # Write back to file
+        with open(PKCE_STORAGE_FILE, 'w') as f:
+            json.dump(storage, f)
+        
+    except Exception as e:
+        st.error(f"Failed to save PKCE verifier: {e}")
+
+def load_pkce_verifier(session_id):
+    """Load PKCE verifier from file storage by session ID."""
+    try:
+        if not os.path.exists(PKCE_STORAGE_FILE):
+            return None
+        
+        with open(PKCE_STORAGE_FILE, 'r') as f:
+            storage = json.load(f)
+        
+        if session_id in storage:
+            return storage[session_id]['verifier']
+        return None
+        
+    except Exception as e:
+        st.error(f"Failed to load PKCE verifier: {e}")
+        return None
+
+def cleanup_old_pkce_verifiers():
+    """Remove PKCE verifiers older than 10 minutes."""
+    try:
+        if not os.path.exists(PKCE_STORAGE_FILE):
+            return
+        
+        with open(PKCE_STORAGE_FILE, 'r') as f:
+            storage = json.load(f)
+        
+        import time
+        current_time = time.time()
+        # Keep only verifiers less than 10 minutes old
+        storage = {k: v for k, v in storage.items() 
+                  if current_time - v.get('timestamp', 0) < 600}
+        
+        with open(PKCE_STORAGE_FILE, 'w') as f:
+            json.dump(storage, f)
+            
+    except Exception as e:
+        pass  # Silently fail for cleanup
+
+# ============================================================================
+# OAuth Configuration
+# ============================================================================
+
+# OAuth Configuration (from environment variables or Streamlit secrets)
+# Safely check for secrets without throwing error if file doesn't exist
+try:
+    CLIENT_ID = st.secrets.get('SF_CLIENT_ID', os.getenv('SF_CLIENT_ID', ''))
+    CLIENT_SECRET = st.secrets.get('SF_CLIENT_SECRET', os.getenv('SF_CLIENT_SECRET', ''))
+    REDIRECT_URI = st.secrets.get('SF_REDIRECT_URI', os.getenv('SF_REDIRECT_URI', 'http://localhost:8501/'))
+except:
+    # No secrets file, use environment variables only
+    CLIENT_ID = os.getenv('SF_CLIENT_ID', '')
+    CLIENT_SECRET = os.getenv('SF_CLIENT_SECRET', '')
+    REDIRECT_URI = os.getenv('SF_REDIRECT_URI', 'http://localhost:8501/')
 
 # Page config
 st.set_page_config(
@@ -29,6 +120,22 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Cleanup old PKCE verifiers on page load
+cleanup_old_pkce_verifiers()
+
+# Initialize session state for OAuth
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
+if 'access_token' not in st.session_state:
+    st.session_state.access_token = None
+if 'instance_url' not in st.session_state:
+    st.session_state.instance_url = None
+if 'refresh_token' not in st.session_state:
+    st.session_state.refresh_token = None
+if 'oauth_session_id' not in st.session_state:
+    # Generate unique session ID for this user's OAuth flow
+    st.session_state.oauth_session_id = secrets_module.token_urlsafe(16)
 
 # Custom CSS
 st.markdown("""
@@ -107,6 +214,146 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# ============================================================================
+# OAuth Authentication Flow
+# ============================================================================
+
+# Handle OAuth callback
+query_params = st.query_params
+if 'code' in query_params and not st.session_state.authenticated:
+    try:
+        code = query_params['code']
+        # State parameter format: "sessionID:org_type" where org_type is "production" or "sandbox"
+        state = query_params.get('state', '')
+        
+        if ':' in state:
+            session_id, org_type = state.split(':', 1)
+            is_sandbox = (org_type == 'sandbox')
+        else:
+            # Fallback for old format
+            is_sandbox = (state == 'sandbox')
+            session_id = st.session_state.oauth_session_id
+        
+        # Load PKCE verifier from file storage
+        code_verifier = load_pkce_verifier(session_id)
+        
+        if not code_verifier:
+            st.error("❌ OAuth session expired or invalid. Please log in again.")
+            st.query_params.clear()
+            st.rerun()
+        
+        with st.spinner("🔐 Authenticating with Salesforce..."):
+            token_response = exchange_code_for_token(
+                code=code,
+                client_id=CLIENT_ID,
+                client_secret=CLIENT_SECRET,
+                redirect_uri=REDIRECT_URI,
+                is_sandbox=is_sandbox,
+                code_verifier=code_verifier
+            )
+            
+            st.session_state.access_token = token_response['access_token']
+            st.session_state.instance_url = token_response['instance_url']
+            st.session_state.refresh_token = token_response.get('refresh_token')
+            st.session_state.authenticated = True
+            
+            st.query_params.clear()
+            st.rerun()
+    except Exception as e:
+        st.error(f"❌ Authentication failed: {str(e)}")
+        st.info("🔄 Please try logging in again.")
+
+        verifier_prod, challenge_prod = generate_pkce_pair()
+        st.session_state.pkce_prod = {'verifier': verifier_prod, 'challenge': challenge_prod}
+        verifier_sandbox, challenge_sandbox = generate_pkce_pair()
+        st.session_state.pkce_sandbox = {'verifier': verifier_sandbox, 'challenge': challenge_sandbox}
+        st.session_state.authenticated = False
+
+# Show login screen if not authenticated
+if not st.session_state.authenticated:
+    st.markdown("""
+    <div class="main-header" style="text-align: center;">
+        <h1>🚀 Salesforce Release Analyzer</h1>
+        <p>AI-powered tool to analyze Salesforce release notes and identify impacted components in your org</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.markdown("---")
+    
+    # Check OAuth configuration
+    if not CLIENT_ID or not CLIENT_SECRET or not REDIRECT_URI:
+        st.error("⚙️ **OAuth Configuration Required**")
+        st.markdown("""
+        Set these environment variables or Streamlit secrets:
+        - `SF_CLIENT_ID` - Connected App Consumer Key
+        - `SF_CLIENT_SECRET` - Connected App Consumer Secret
+        - `SF_REDIRECT_URI` - OAuth callback URL (e.g., http://localhost:8501/)
+        
+        See OAUTH_DEPLOYMENT_GUIDE.md for setup instructions.
+        """)
+        st.stop()
+    
+    # Login options
+    col1, col2, col3 = st.columns([1, 2, 1])
+    
+    with col2:
+        st.markdown("### 🔐 Sign in to get started")
+        st.markdown("Connect your Salesforce org to analyze release impacts")
+        
+        st.markdown("")  # Spacing
+        
+        # Production login - generate fresh PKCE pair and save verifier
+        prod_verifier, prod_challenge = generate_pkce_pair()
+        session_id = st.session_state.oauth_session_id
+        save_pkce_verifier(f"{session_id}_prod", prod_verifier)
+        
+        prod_auth_url = get_authorization_url(
+            client_id=CLIENT_ID,
+            redirect_uri=REDIRECT_URI,
+            is_sandbox=False,
+            code_challenge=prod_challenge,
+            state=f"{session_id}_prod:production"
+        )
+        
+        st.link_button(
+            "🌐 Login with Production / Developer Org",
+            prod_auth_url,
+            use_container_width=True
+        )
+        
+        st.markdown("")  # Spacing
+        
+        # Sandbox login - generate fresh PKCE pair and save verifier
+        sandbox_verifier, sandbox_challenge = generate_pkce_pair()
+        save_pkce_verifier(f"{session_id}_sandbox", sandbox_verifier)
+        
+        sandbox_auth_url = get_authorization_url(
+            client_id=CLIENT_ID,
+            redirect_uri=REDIRECT_URI,
+            is_sandbox=True,
+            code_challenge=sandbox_challenge,
+            state=f"{session_id}_sandbox:sandbox"
+        )
+        
+        st.link_button(
+            "🧪 Login with Sandbox Org",
+            sandbox_auth_url,
+            use_container_width=True
+        )
+        
+        st.markdown("---")
+        st.info("""
+        **🔒 Secure OAuth Authentication**
+        
+        Your credentials are never stored. You'll login via Salesforce, then return here to use the app.
+        """)
+    
+    st.stop()  # Don't render the rest of the app
+
+# ============================================================================
+# Main Application (only shown when authenticated)
+# ============================================================================
+
 # Title
 st.markdown("""
 <div class="main-header">
@@ -117,6 +364,30 @@ st.markdown("""
 
 # Sidebar - Configuration
 with st.sidebar:
+    # Show connection status and logout
+    st.success(f"✅ Connected to Salesforce")
+    st.caption(f"Instance: {st.session_state.instance_url}")
+    
+    if st.button("🚪 Logout", use_container_width=True):
+        try:
+            if st.session_state.access_token:
+                revoke_token(st.session_state.access_token, CLIENT_ID, CLIENT_SECRET)
+        except:
+            pass  # Ignore revocation errors
+        
+        # Clear session state
+        st.session_state.authenticated = False
+        st.session_state.access_token = None
+        st.session_state.instance_url = None
+        st.session_state.refresh_token = None
+        
+        # Generate new session ID for next login
+        st.session_state.oauth_session_id = secrets_module.token_urlsafe(16)
+        
+        st.rerun()
+    
+    st.divider()
+    
     st.header("⚙️ Configuration")
     
     st.subheader("📁 Release Notes Input")
@@ -164,102 +435,336 @@ with st.sidebar:
     
     st.divider()
     
-    st.subheader("🔐 Salesforce Connection")
-    
-    sf_username = st.text_input(
-        "Username",
-        value=os.getenv('SF_USERNAME', ''),
-        help="Your Salesforce username (email format)"
-    )
-    
-    sf_password = st.text_input(
-        "Password",
-        type="password",
-        value=os.getenv('SF_PASSWORD', ''),
-        help="Your Salesforce password"
-    )
-    
-    sf_token = st.text_input(
-        "Security Token",
-        type="password",
-        value=os.getenv('SF_TOKEN', ''),
-        help="Security token from email (Setup → Reset Security Token)"
-    )
-    
-    sf_domain = st.selectbox(
-        "Environment",
-        ["login", "test"],
-        index=0 if os.getenv('SF_DOMAIN', 'login') == 'login' else 1,
-        help="login = Production/Developer, test = Sandbox"
-    )
-    
-    st.divider()
-    
     st.subheader("🤖 AI Configuration")
     
-    gemini_key = st.text_input(
-        "Gemini API Key",
-        type="password",
-        value=os.getenv('GEMINI_API_KEY', ''),
-        help="Get free key from ai.google.dev"
+    # AI Provider Selection
+    ai_provider = st.selectbox(
+        "AI Provider",
+        ["Gemini (Google)", "OpenAI (ChatGPT)"],
+        help="Choose which AI to use for analysis"
     )
     
-    st.markdown("""
-    <small>
-    📌 <a href="https://ai.google.dev/" target="_blank">Get free Gemini API key</a><br>
-    💡 Free tier: 1M tokens/day (enough for ~100 analyses)
-    </small>
-    """, unsafe_allow_html=True)
+    provider_key = "gemini" if "Gemini" in ai_provider else "openai"
+    
+    # API Key Input (dynamic based on provider)
+    if provider_key == "gemini":
+        api_key = st.text_input(
+            "Gemini API Key",
+            type="password",
+            value=os.getenv('GEMINI_API_KEY', ''),
+            help="Free key from ai.google.dev"
+        )
+        st.markdown("""
+        <small>
+        📌 <a href="https://ai.google.dev/" target="_blank">Get free Gemini API key</a><br>
+        💡 Free tier: 60 requests/minute
+        </small>
+        """, unsafe_allow_html=True)
+    else:
+        api_key = st.text_input(
+            "OpenAI API Key",
+            type="password",
+            value=os.getenv('OPENAI_API_KEY', ''),
+            help="API key from platform.openai.com"
+        )
+        st.markdown("""
+        <small>
+        📌 <a href="https://platform.openai.com/" target="_blank">Get OpenAI API key</a><br>
+        💡 Uses gpt-4o-mini (fast and cost-effective)
+        </small>
+        """, unsafe_allow_html=True)
     
     st.divider()
     
     # Cache management
     st.subheader("🔧 Advanced Settings")
     
-    import os
-    cache_exists = os.path.exists('ai_analysis_cache.json')
+    cache_file = f'ai_analysis_cache_{provider_key}.json'
+    cache_exists = os.path.exists(cache_file)
     if cache_exists:
         try:
-            with open('ai_analysis_cache.json', 'r') as f:
+            with open(cache_file, 'r') as f:
                 cache_data = json.load(f)
-            st.success(f"✅ Cache active: {len(cache_data)} cached analysis")
+            st.success(f"✅ Cache active: {len(cache_data)} cached analysis ({provider_key.title()})")
         except:
-            st.info("ℹ️ Cache file exists")
+            st.info(f"ℹ️ Cache file exists ({provider_key})")
     else:
-        st.info("ℹ️ No cached analyses yet")
+        st.info(f"ℹ️ No cached analyses yet ({provider_key})")
     
     if st.button("🗑️ Clear Cache", help="Force fresh analysis (ignore cached results)", use_container_width=True):
         try:
-            if os.path.exists('ai_analysis_cache.json'):
-                os.remove('ai_analysis_cache.json')
+            if os.path.exists(cache_file):
+                os.remove(cache_file)
                 st.success("✅ Cache cleared! Next analysis will be fresh.")
             else:
                 st.info("ℹ️ No cache to clear")
         except Exception as e:
             st.error(f"❌ Error clearing cache: {e}")
 
+# ============================================================================
+# Helper Functions for Visual Diagrams
+# ============================================================================
+
+def generate_visual_html_diagram(impact):
+    """Generate beautiful HTML/CSS hierarchical diagram for delete impact analysis"""
+    target = impact['targetObject']
+    md_deps = impact.get('masterDetailChildren', [])
+    lk_deps = impact.get('lookupChildren', [])
+    
+    # Build dependency cards HTML
+    md_cards_html = ""
+    for dep in md_deps:
+        md_cards_html += f"""
+                <div class="dependency-card master-detail">
+                    <div class="card-object">🔗 {dep['childObject']}</div>
+                    <div class="card-field">{dep['childField']}</div>
+                    <div>
+                        <span class="card-badge badge-cascade">CASCADE DELETE</span>
+                    </div>
+                </div>
+            """
+    
+    lk_cards_html = ""
+    for dep in lk_deps:
+        restricted = dep.get('restrictedDelete', False)
+        restricted_badge = '<span class="card-badge badge-restricted">RESTRICTED DELETE</span>' if restricted else ''
+        lk_cards_html += f"""
+                <div class="dependency-card lookup">
+                    <div class="card-object">🔗 {dep['childObject']}</div>
+                    <div class="card-field">{dep['childField']}</div>
+                    <div>
+                        <span class="card-badge badge-orphaned">ORPHANED</span>
+                        {restricted_badge}
+                    </div>
+                </div>
+            """
+    
+    # Build complete HTML
+    html = f"""
+    <style>
+        .hierarchy-container {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            padding: 30px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+        }}
+        .target-object {{
+            background: white;
+            padding: 25px 35px;
+            border-radius: 12px;
+            text-align: center;
+            font-size: 24px;
+            font-weight: bold;
+            color: #1e3a8a;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.15);
+            margin-bottom: 40px;
+            border: 3px solid #3b82f6;
+        }}
+        .dependency-section {{
+            background: rgba(255,255,255,0.95);
+            padding: 25px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }}
+        .section-title {{
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 3px solid;
+        }}
+        .section-title.critical {{
+            color: #dc2626;
+            border-color: #dc2626;
+        }}
+        .section-title.warning {{
+            color: #ea580c;
+            border-color: #ea580c;
+        }}
+        .dependency-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }}
+        .dependency-card {{
+            padding: 18px;
+            border-radius: 10px;
+            border-left: 5px solid;
+            background: white;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }}
+        .dependency-card:hover {{
+            transform: translateY(-3px);
+            box-shadow: 0 6px 20px rgba(0,0,0,0.15);
+        }}
+        .dependency-card.master-detail {{
+            border-color: #dc2626;
+            background: linear-gradient(135deg, #fff 0%, #fee2e2 100%);
+        }}
+        .dependency-card.lookup {{
+            border-color: #ea580c;
+            background: linear-gradient(135deg, #fff 0%, #ffedd5 100%);
+        }}
+        .card-object {{
+            font-size: 16px;
+            font-weight: bold;
+            color: #1f2937;
+            margin-bottom: 8px;
+        }}
+        .card-field {{
+            font-size: 14px;
+            color: #6b7280;
+            font-family: 'Courier New', monospace;
+            background: rgba(0,0,0,0.05);
+            padding: 4px 8px;
+            border-radius: 4px;
+            display: inline-block;
+            margin-top: 5px;
+        }}
+        .card-badge {{
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: bold;
+            margin-top: 8px;
+            text-transform: uppercase;
+        }}
+        .badge-cascade {{
+            background: #dc2626;
+            color: white;
+        }}
+        .badge-orphaned {{
+            background: #ea580c;
+            color: white;
+        }}
+        .badge-restricted {{
+            background: #7c2d12;
+            color: white;
+        }}
+        .no-deps {{
+            text-align: center;
+            padding: 40px;
+            color: #059669;
+            font-size: 20px;
+            font-weight: bold;
+            background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);
+            border-radius: 12px;
+            border: 3px solid #059669;
+        }}
+    </style>
+    
+    <div class="hierarchy-container">
+        <div class="target-object">
+            📦 {target}
+            <div style="font-size: 14px; color: #6b7280; margin-top: 8px; font-weight: normal;">
+                Target Object for Delete Impact Analysis
+            </div>
+        </div>
+    """
+    
+    if md_deps:
+        html += f"""
+        <div class="dependency-section">
+            <div class="section-title critical">
+                🔴 Master-Detail Dependencies (CASCADE DELETE)
+                <div style="font-size: 13px; font-weight: normal; color: #991b1b; margin-top: 5px;">
+                    ⚠️ These child records will be PERMANENTLY DELETED when parent is deleted
+                </div>
+            </div>
+            <div class="dependency-grid">
+                {md_cards_html}
+            </div>
+        </div>
+        """
+    
+    if lk_deps:
+        html += f"""
+        <div class="dependency-section">
+            <div class="section-title warning">
+                🟡 Lookup Dependencies (ORPHANED RECORDS)
+                <div style="font-size: 13px; font-weight: normal; color: #9a3412; margin-top: 5px;">
+                    ⚠️ These child records will remain but their lookup field will become NULL (broken reference)
+                </div>
+            </div>
+            <div class="dependency-grid">
+                {lk_cards_html}
+            </div>
+        </div>
+        """
+    
+    if not md_deps and not lk_deps:
+        html += """
+        <div class="no-deps">
+            ✅ SAFE TO DELETE
+            <div style="font-size: 14px; margin-top: 10px; font-weight: normal;">
+                No child dependencies found. Deleting this object won't cascade to any other objects.
+            </div>
+        </div>
+        """
+    
+    html += """
+    </div>
+    """
+    
+    return html
+
+
+def generate_text_tree_diagram(impact):
+    """Generate ASCII tree diagram for copy-paste"""
+    target = impact['targetObject']
+    md_deps = impact.get('masterDetailChildren', [])
+    lk_deps = impact.get('lookupChildren', [])
+    
+    tree = f"📦 {target} (Target Object)\n"
+    tree += "│\n"
+    
+    if md_deps:
+        tree += "├── 🔴 Master-Detail Dependencies (CASCADE DELETE)\n"
+        for i, dep in enumerate(md_deps):
+            prefix = "│   ├── " if i < len(md_deps) - 1 else "│   └── "
+            tree += f"{prefix}{dep['childObject']}.{dep['childField']}\n"
+        tree += "│\n"
+    
+    if lk_deps:
+        tree += "└── 🟡 Lookup Dependencies (ORPHANED)\n"
+        for i, dep in enumerate(lk_deps):
+            prefix = "    ├── " if i < len(lk_deps) - 1 else "    └── "
+            restricted = " [RESTRICTED DELETE]" if dep.get('restrictedDelete', False) else ""
+            tree += f"{prefix}{dep['childObject']}.{dep['childField']}{restricted}\n"
+    
+    if not md_deps and not lk_deps:
+        tree += "└── ✅ No dependencies (SAFE TO DELETE)\n"
+    
+    return tree
+
+# ============================================================================
 # Main content
+# ============================================================================
 tab1, tab2, tab3, tab4 = st.tabs(["📊 Release Analysis", "🔍 Field Usage", "🏥 Org Health", "ℹ️ About"])
 
 with tab1:
     st.header("Run Analysis")
     
-    # Validation
+    # Validation (OAuth already verified if we're here)
     can_analyze = (
         release_text and
-        sf_username and
-        sf_password and
-        sf_token and
-        gemini_key
+        api_key and
+        st.session_state.authenticated
     )
     
     if not can_analyze:
         st.warning("⚠️ Please complete all configuration in the sidebar")
-        st.info("""
+        st.info(f"""
         **Required:**
         - Release notes (PDF upload or text paste)
-        - Salesforce credentials (username, password, security token)
-        - Gemini API key (free from ai.google.dev)
+        - {ai_provider} API key
+        
+        You're already authenticated with Salesforce ✅
         """)
     
     analyze_button = st.button(
@@ -275,15 +780,13 @@ with tab1:
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            # Step 1: Connect to Salesforce
+            # Step 1: Connect to Salesforce via OAuth
             status_text.text("🔐 Connecting to Salesforce...")
             progress_bar.progress(10)
             
             sf_client = SalesforceOrgScanner(
-                sf_username,
-                sf_password,
-                sf_token,
-                sf_domain
+                instance_url=st.session_state.instance_url,
+                access_token=st.session_state.access_token
             )
             
             # Step 2: Fetch metadata
@@ -296,10 +799,10 @@ with tab1:
             progress_bar.progress(40)
             
             # Step 3: AI comprehensive analysis of release notes
-            status_text.text("🤖 AI performing comprehensive release analysis...")
+            status_text.text(f"🤖 AI ({ai_provider}) performing comprehensive release analysis...")
             progress_bar.progress(50)
             
-            ai_analyzer = AIAnalyzer(gemini_key)
+            ai_analyzer = AIAnalyzer(api_key, provider=provider_key)
             page_map = st.session_state.get('page_map', None)
             release_analysis = ai_analyzer.analyze_comprehensive_release(release_text, page_map)
             
@@ -481,316 +984,662 @@ with tab1:
             st.exception(e)
 
 with tab2:
-    st.header("🔍 Field Usage Analysis")
-    st.markdown("Analyze where specific fields are used across all components in your org")
+    st.header("🔍 Field & Relationship Analysis")
     
     # Connection validation
-    can_analyze_fields = sf_username and sf_password and sf_token
+    can_analyze_fields = st.session_state.authenticated and st.session_state.access_token
     
     if not can_analyze_fields:
-        st.warning("⚠️ Please enter Salesforce credentials in the sidebar to analyze field usage")
+        st.warning("⚠️ Please login with Salesforce to analyze fields")
     else:
-        # Initialize session state for field analysis
-        if 'field_analysis_results' not in st.session_state:
-            st.session_state.field_analysis_results = None
-        if 'selected_objects' not in st.session_state:
-            st.session_state.selected_objects = []
-        if 'object_fields_map' not in st.session_state:
-            st.session_state.object_fields_map = {}
+        # Create sub-tabs for different analysis types
+        subtab1, subtab2, subtab3 = st.tabs(["📊 Field Usage", "🗑️ Delete Impact", "🔗 Lookup Relationships"])
         
-        st.divider()
-        
-        col1, col2 = st.columns([1, 1])
-        
-        with col1:
-            st.subheader("1️⃣ Select Objects & Fields")
+        # Field Usage Analysis Tab
+        with subtab1:
+            st.markdown("Analyze where specific fields are used across all components in your org")
             
-            # Fetch objects button
-            if st.button("📦 Load Objects from Org", use_container_width=True):
-                with st.spinner("Fetching objects..."):
-                    try:
-                        sf_client = SalesforceOrgScanner(
-                            username=sf_username,
-                            password=sf_password,
-                            security_token=sf_token,
-                            domain=sf_domain
-                        )
-                        objects = sf_client.get_all_objects()
-                        st.session_state.available_objects = objects
-                        st.success(f"✅ Loaded {len(objects)} objects")
-                    except Exception as e:
-                        st.error(f"❌ Error: {str(e)}")
+            # Initialize session state for field analysis
+            if 'field_analysis_results' not in st.session_state:
+                st.session_state.field_analysis_results = None
+            if 'selected_objects' not in st.session_state:
+                st.session_state.selected_objects = []
+            if 'object_fields_map' not in st.session_state:
+                st.session_state.object_fields_map = {}
             
-            # Object selection UI
-            if 'available_objects' in st.session_state:
-                st.markdown("### Add Object & Fields")
+            st.divider()
+            
+            col1, col2 = st.columns([1, 1])
+            
+            with col1:
+                st.subheader("1️⃣ Select Objects & Fields")
                 
-                # Object selector
-                object_options = {obj['label']: obj['name'] for obj in st.session_state.available_objects}
-                selected_object_label = st.selectbox(
-                    "Select Object",
-                    options=list(object_options.keys()),
-                    key="object_selector"
-                )
+                # Fetch objects button
+                if st.button("📦 Load Objects from Org", use_container_width=True):
+                    with st.spinner("Fetching objects..."):
+                        try:
+                            sf_client = SalesforceOrgScanner(
+                                instance_url=st.session_state.instance_url,
+                                access_token=st.session_state.access_token
+                            )
+                            objects = sf_client.get_all_objects()
+                            st.session_state.available_objects = objects
+                            st.success(f"✅ Loaded {len(objects)} objects")
+                        except Exception as e:
+                            st.error(f"❌ Error: {str(e)}")
                 
-                if selected_object_label:
-                    selected_object = object_options[selected_object_label]
+                # Object selection UI
+                if 'available_objects' in st.session_state:
+                    st.markdown("### Add Object & Fields")
                     
-                    # Field input
-                    field_input = st.text_input(
-                        "Comma-separated Field API Names",
-                        placeholder="Name, Industry, Type",
-                        help="Enter field API names separated by commas",
-                        key="field_input"
+                    # Object selector
+                    object_options = {obj['label']: obj['name'] for obj in st.session_state.available_objects}
+                    selected_object_label = st.selectbox(
+                        "Select Object",
+                        options=list(object_options.keys()),
+                        key="object_selector"
                     )
                     
-                    # Add button
-                    if st.button("➕ Add Object & Fields", use_container_width=True):
-                        if field_input:
-                            # Parse fields
-                            fields = [f.strip() for f in field_input.split(',') if f.strip()]
-                            
-                            # Add to map
-                            if selected_object in st.session_state.object_fields_map:
-                                st.session_state.object_fields_map[selected_object].extend(fields)
-                                # Remove duplicates
-                                st.session_state.object_fields_map[selected_object] = list(set(st.session_state.object_fields_map[selected_object]))
+                    if selected_object_label:
+                        selected_object = object_options[selected_object_label]
+                        
+                        # Field input
+                        field_input = st.text_input(
+                            "Comma-separated Field API Names",
+                            placeholder="Name, Industry, Type",
+                            help="Enter field API names separated by commas",
+                            key="field_input"
+                        )
+                        
+                        # Add button
+                        if st.button("➕ Add Object & Fields", use_container_width=True):
+                            if field_input:
+                                # Parse fields
+                                fields = [f.strip() for f in field_input.split(',') if f.strip()]
+                                
+                                # Add to map
+                                if selected_object in st.session_state.object_fields_map:
+                                    st.session_state.object_fields_map[selected_object].extend(fields)
+                                    # Remove duplicates
+                                    st.session_state.object_fields_map[selected_object] = list(set(st.session_state.object_fields_map[selected_object]))
+                                else:
+                                    st.session_state.object_fields_map[selected_object] = fields
+                                
+                                st.success(f"✅ Added {len(fields)} fields for {selected_object}")
+                                st.rerun()
                             else:
-                                st.session_state.object_fields_map[selected_object] = fields
-                            
-                            st.success(f"✅ Added {len(fields)} fields for {selected_object}")
+                                st.warning("⚠️ Please enter at least one field")
+                    
+                    # Display selected objects and fields
+                    if st.session_state.object_fields_map:
+                        st.markdown("### Selected for Analysis")
+                        
+                        for obj_name, fields in st.session_state.object_fields_map.items():
+                            with st.expander(f"📦 {obj_name} ({len(fields)} fields)"):
+                                for field in fields:
+                                    col_a, col_b = st.columns([4, 1])
+                                    with col_a:
+                                        st.text(f"• {field}")
+                                    with col_b:
+                                        if st.button("❌", key=f"remove_{obj_name}_{field}"):
+                                            st.session_state.object_fields_map[obj_name].remove(field)
+                                            if not st.session_state.object_fields_map[obj_name]:
+                                                del st.session_state.object_fields_map[obj_name]
+                                            st.rerun()
+                        
+                        if st.button("🗑️ Clear All", use_container_width=True):
+                            st.session_state.object_fields_map = {}
                             st.rerun()
-                        else:
-                            st.warning("⚠️ Please enter at least one field")
-                
-                # Display selected objects and fields
-                if st.session_state.object_fields_map:
-                    st.markdown("### Selected for Analysis")
-                    
-                    for obj_name, fields in st.session_state.object_fields_map.items():
-                        with st.expander(f"📦 {obj_name} ({len(fields)} fields)"):
-                            for field in fields:
-                                col_a, col_b = st.columns([4, 1])
-                                with col_a:
-                                    st.text(f"• {field}")
-                                with col_b:
-                                    if st.button("❌", key=f"remove_{obj_name}_{field}"):
-                                        st.session_state.object_fields_map[obj_name].remove(field)
-                                        if not st.session_state.object_fields_map[obj_name]:
-                                            del st.session_state.object_fields_map[obj_name]
-                                        st.rerun()
-                    
-                    if st.button("🗑️ Clear All", use_container_width=True):
-                        st.session_state.object_fields_map = {}
-                        st.rerun()
-        
-        with col2:
-            st.subheader("2️⃣ Run Analysis")
-            
-            if not st.session_state.object_fields_map:
-                st.info("👈 Add objects and fields to analyze")
-            else:
-                total_fields = sum(len(fields) for fields in st.session_state.object_fields_map.values())
-                st.metric("Fields to Analyze", total_fields)
-                
-                analyze_button = st.button(
-                    "🚀 Analyze Field Usage",
-                    type="primary",
-                    use_container_width=True
-                )
-                
-                if analyze_button:
-                    try:
-                        # Create progress bar
-                        progress_bar = st.progress(0)
-                        status_text = st.empty()
-                        
-                        # Connect to Salesforce
-                        status_text.text("🔐 Connecting to Salesforce...")
-                        progress_bar.progress(5)
-                        
-                        sf_client = SalesforceOrgScanner(
-                            username=sf_username,
-                            password=sf_password,
-                            security_token=sf_token,
-                            domain=sf_domain
-                        )
-                        
-                        progress_bar.progress(10)
-                        
-                        # Fetch all metadata with progress updates
-                        status_text.text("📦 Fetching Apex Classes...")
-                        progress_bar.progress(15)
-                        metadata = {'apex': sf_client.get_all_apex_classes()}
-                        
-                        status_text.text("⚡ Fetching Triggers...")
-                        progress_bar.progress(30)
-                        metadata['triggers'] = sf_client.get_all_triggers()
-                        
-                        status_text.text("💡 Fetching LWC Components...")
-                        progress_bar.progress(45)
-                        metadata['lwc'] = sf_client.get_all_lwc_components()
-                        
-                        status_text.text("🔄 Fetching Flows...")
-                        progress_bar.progress(60)
-                        metadata['flows'] = sf_client.get_all_flows()
-                        
-                        # Calculate summary
-                        metadata['summary'] = {
-                            'apex': len(metadata['apex']),
-                            'triggers': len(metadata['triggers']),
-                            'lwc': len(metadata['lwc']),
-                            'flows': len(metadata['flows'])
-                        }
-                        metadata['totalComponents'] = sum(metadata['summary'].values())
-                        
-                        progress_bar.progress(70)
-                        status_text.text(f"✅ Fetched {metadata['totalComponents']} components!")
-                        
-                        # Run field analysis
-                        status_text.text("🔬 Analyzing field usage across all components...")
-                        progress_bar.progress(75)
-                        
-                        analyzer = FieldUsageAnalyzer(sf_client)
-                        results = analyzer.analyze_field_usage(
-                            st.session_state.object_fields_map,
-                            metadata
-                        )
-                        
-                        progress_bar.progress(95)
-                        
-                        # Store results
-                        st.session_state.field_analysis_results = results
-                        st.session_state.field_analysis_summary = analyzer.get_summary()
-                        
-                        progress_bar.progress(100)
-                        status_text.text(f"✅ Analysis complete! Found {len(results)} usages")
-                        
-                    except Exception as e:
-                        st.error(f"❌ Error during analysis: {str(e)}")
-                        st.exception(e)
-        
-        # Display results
-        if st.session_state.field_analysis_results:
-            st.divider()
-            st.header("📊 Analysis Results")
-            
-            # Summary metrics
-            summary = st.session_state.field_analysis_summary
-            
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Total Usages", summary.get('total_usages', 0))
-            with col2:
-                st.metric("Active Usages", summary.get('active_usages', 0))
-            with col3:
-                st.metric("Commented Out", summary.get('commented_usages', 0))
-            with col4:
-                st.metric("Components", summary.get('unique_components', 0))
-            
-            # Breakdown by component type
-            st.subheader("📂 Usage by Component Type")
-            by_component = summary.get('by_component_type', {})
-            if by_component:
-                df_component = pd.DataFrame(list(by_component.items()), columns=['Component Type', 'Count'])
-                st.bar_chart(df_component.set_index('Component Type'))
-            
-            # Detailed results table
-            st.subheader("📋 Detailed Results")
-            
-            # Check if any fields had non-filterable issues
-            non_filterable_note = False
-            if st.session_state.field_analysis_results:
-                for result in st.session_state.field_analysis_results:
-                    if result.get('population_percentage', 0) == 0 and result.get('total_records', 0) > 0:
-                        non_filterable_note = True
-                        break
-            
-            if non_filterable_note:
-                st.info("ℹ️ Some fields show 0% population because they are non-filterable (e.g., Long Text Area, Encrypted fields). Usage analysis is still performed for these fields.")
-            
-            results_df = pd.DataFrame(st.session_state.field_analysis_results)
-            
-            # Filters
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                filter_object = st.multiselect(
-                    "Filter by Object",
-                    options=results_df['object'].unique(),
-                    default=results_df['object'].unique()
-                )
-            with col2:
-                filter_component = st.multiselect(
-                    "Filter by Component Type",
-                    options=results_df['component_type'].unique(),
-                    default=results_df['component_type'].unique()
-                )
-            with col3:
-                show_commented = st.checkbox("Include Commented Code", value=True)
-            
-            # Apply filters
-            filtered_df = results_df[
-                (results_df['object'].isin(filter_object)) &
-                (results_df['component_type'].isin(filter_component))
-            ]
-            
-            if not show_commented:
-                filtered_df = filtered_df[filtered_df['is_commented'] == False]
-            
-            # Display table
-            st.dataframe(
-                filtered_df[[
-                    'object', 'field', 'component_type', 'component_name', 
-                    'file_type', 'line_number', 'method_name', 'code_snippet',
-                    'is_active', 'population_percentage'
-                ]],
-                use_container_width=True,
-                height=400
-            )
-            
-            # Export options
-            st.divider()
-            st.subheader("📥 Export Results")
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                # CSV export
-                csv = filtered_df.to_csv(index=False)
-                st.download_button(
-                    label="📄 Download as CSV",
-                    data=csv,
-                    file_name="field_usage_analysis.csv",
-                    mime="text/csv",
-                    use_container_width=True
-                )
             
             with col2:
-                # Excel export (if openpyxl available)
-                try:
-                    import io
-                    buffer = io.BytesIO()
-                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                        filtered_df.to_excel(writer, sheet_name='Field Usage', index=False)
+                st.subheader("2️⃣ Run Analysis")
+                
+                if not st.session_state.object_fields_map:
+                    st.info("👈 Add objects and fields to analyze")
+                else:
+                    total_fields = sum(len(fields) for fields in st.session_state.object_fields_map.values())
+                    st.metric("Fields to Analyze", total_fields)
                     
-                    st.download_button(
-                        label="📊 Download as Excel",
-                        data=buffer.getvalue(),
-                        file_name="field_usage_analysis.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    analyze_button = st.button(
+                        "🚀 Analyze Field Usage",
+                        type="primary",
                         use_container_width=True
                     )
-                except ImportError:
-                    st.info("💡 Install openpyxl for Excel export: pip install openpyxl")
+                    
+                    if analyze_button:
+                        try:
+                            # Create progress bar
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            
+                            # Connect to Salesforce via OAuth
+                            status_text.text("🔐 Connecting to Salesforce...")
+                            progress_bar.progress(5)
+                            
+                            sf_client = SalesforceOrgScanner(
+                                instance_url=st.session_state.instance_url,
+                                access_token=st.session_state.access_token
+                            )
+                            
+                            progress_bar.progress(10)
+                            
+                            # Fetch all metadata with progress updates
+                            status_text.text("📦 Fetching Apex Classes...")
+                            progress_bar.progress(15)
+                            metadata = {'apex': sf_client.get_all_apex_classes()}
+                            
+                            status_text.text("⚡ Fetching Triggers...")
+                            progress_bar.progress(30)
+                            metadata['triggers'] = sf_client.get_all_triggers()
+                            
+                            status_text.text("💡 Fetching LWC Components...")
+                            progress_bar.progress(45)
+                            metadata['lwc'] = sf_client.get_all_lwc_components()
+                            
+                            status_text.text("🔄 Fetching Flows...")
+                            progress_bar.progress(60)
+                            metadata['flows'] = sf_client.get_all_flows()
+                            
+                            # Calculate summary
+                            metadata['summary'] = {
+                                'apex': len(metadata['apex']),
+                                'triggers': len(metadata['triggers']),
+                                'lwc': len(metadata['lwc']),
+                                'flows': len(metadata['flows'])
+                            }
+                            metadata['totalComponents'] = sum(metadata['summary'].values())
+                            
+                            progress_bar.progress(70)
+                            status_text.text(f"✅ Fetched {metadata['totalComponents']} components!")
+                            
+                            # Run field analysis
+                            status_text.text("🔬 Analyzing field usage across all components...")
+                            progress_bar.progress(75)
+                            
+                            analyzer = FieldUsageAnalyzer(sf_client)
+                            results = analyzer.analyze_field_usage(
+                                st.session_state.object_fields_map,
+                                metadata
+                            )
+                            
+                            progress_bar.progress(95)
+                            
+                            # Store results
+                            st.session_state.field_analysis_results = results
+                            st.session_state.field_analysis_summary = analyzer.get_summary()
+                            
+                            progress_bar.progress(100)
+                            status_text.text(f"✅ Analysis complete! Found {len(results)} usages")
+                            
+                        except Exception as e:
+                            st.error(f"❌ Error during analysis: {str(e)}")
+                            st.exception(e)
+            
+            # Display results
+            if st.session_state.field_analysis_results:
+                st.divider()
+                st.header("📊 Analysis Results")
+                
+                # Summary metrics
+                summary = st.session_state.field_analysis_summary
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total Usages", summary.get('total_usages', 0))
+                with col2:
+                    st.metric("Active Usages", summary.get('active_usages', 0))
+                with col3:
+                    st.metric("Commented Out", summary.get('commented_usages', 0))
+                with col4:
+                    st.metric("Components", summary.get('unique_components', 0))
+                
+                # Breakdown by component type
+                st.subheader("📂 Usage by Component Type")
+                by_component = summary.get('by_component_type', {})
+                if by_component:
+                    df_component = pd.DataFrame(list(by_component.items()), columns=['Component Type', 'Count'])
+                    st.bar_chart(df_component.set_index('Component Type'))
+                
+                # Detailed results table
+                st.subheader("📋 Detailed Results")
+                
+                # Check if any fields had non-filterable issues
+                non_filterable_note = False
+                if st.session_state.field_analysis_results:
+                    for result in st.session_state.field_analysis_results:
+                        if result.get('population_percentage', 0) == 0 and result.get('total_records', 0) > 0:
+                            non_filterable_note = True
+                            break
+                
+                if non_filterable_note:
+                    st.info("ℹ️ Some fields show 0% population because they are non-filterable (e.g., Long Text Area, Encrypted fields). Usage analysis is still performed for these fields.")
+                
+                results_df = pd.DataFrame(st.session_state.field_analysis_results)
+                
+                # Filters
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    filter_object = st.multiselect(
+                        "Filter by Object",
+                        options=results_df['object'].unique(),
+                        default=results_df['object'].unique()
+                    )
+                with col2:
+                    filter_component = st.multiselect(
+                        "Filter by Component Type",
+                        options=results_df['component_type'].unique(),
+                        default=results_df['component_type'].unique()
+                    )
+                with col3:
+                    show_commented = st.checkbox("Include Commented Code", value=True)
+                
+                # Apply filters
+                filtered_df = results_df[
+                    (results_df['object'].isin(filter_object)) &
+                    (results_df['component_type'].isin(filter_component))
+                ]
+                
+                if not show_commented:
+                    filtered_df = filtered_df[filtered_df['is_commented'] == False]
+                
+                # Display table
+                st.dataframe(
+                    filtered_df[[
+                        'object', 'field', 'component_type', 'component_name', 
+                        'file_type', 'line_number', 'method_name', 'code_snippet',
+                        'is_active', 'population_percentage'
+                    ]],
+                    use_container_width=True,
+                    height=400
+                )
+                
+                # Export options
+                st.divider()
+                st.subheader("📥 Export Results")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # CSV export
+                    csv = filtered_df.to_csv(index=False)
+                    st.download_button(
+                        label="📄 Download as CSV",
+                        data=csv,
+                        file_name="field_usage_analysis.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+                
+                with col2:
+                    # Excel export (if openpyxl available)
+                    try:
+                        import io
+                        buffer = io.BytesIO()
+                        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                            filtered_df.to_excel(writer, sheet_name='Field Usage', index=False)
+                        
+                        st.download_button(
+                            label="📊 Download as Excel",
+                            data=buffer.getvalue(),
+                            file_name="field_usage_analysis.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
+                    except ImportError:
+                        st.info("💡 Install openpyxl for Excel export: pip install openpyxl")
+        
+        # Delete Impact Analysis Tab
+        with subtab2:
+            st.markdown("### 💥 Delete Impact Analysis")
+            st.markdown("**Discover what will be CASCADE DELETED if you delete an object**")
+            st.markdown("Find Master-Detail dependencies and orphaned lookup relationships")
+            
+            st.divider()
+            
+            # Initialize session state
+            if 'delete_impact_results' not in st.session_state:
+                st.session_state.delete_impact_results = None
+            
+            col1, col2 = st.columns([1, 1])
+            
+            with col1:
+                st.subheader("Select Object to Analyze")
+                
+                # Fetch objects button
+                if st.button("📦 Load Objects from Org", key="load_objects_impact", use_container_width=True):
+                    with st.spinner("Fetching objects..."):
+                        try:
+                            sf_client = SalesforceOrgScanner(
+                                instance_url=st.session_state.instance_url,
+                                access_token=st.session_state.access_token
+                            )
+                            objects = sf_client.get_all_objects()
+                            st.session_state.available_objects_impact = objects
+                            st.success(f"✅ Loaded {len(objects)} objects")
+                        except Exception as e:
+                            st.error(f"❌ Error: {str(e)}")
+                
+                # Object selection
+                if 'available_objects_impact' in st.session_state:
+                    object_options = {obj['label']: obj['name'] for obj in st.session_state.available_objects_impact}
+                    
+                    # Single select for impact analysis (more focused)
+                    selected_object_label = st.selectbox(
+                        "Choose object to analyze delete impact",
+                        options=list(object_options.keys()),
+                        key="impact_object_selector",
+                        help="Select the object you're considering deleting"
+                    )
+                    
+                    if selected_object_label:
+                        selected_object = object_options[selected_object_label]
+                        
+                        st.warning(f"⚠️ **Analyzing:** What happens if you delete `{selected_object}`?")
+                        
+                        if st.button("💥 Analyze Delete Impact", type="primary", use_container_width=True):
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            
+                            try:
+                                status_text.text("🔐 Connecting to Salesforce...")
+                                progress_bar.progress(10)
+                                
+                                sf_client = SalesforceOrgScanner(
+                                    instance_url=st.session_state.instance_url,
+                                    access_token=st.session_state.access_token
+                                )
+                                
+                                status_text.text(f"🔍 Scanning all objects for dependencies on {selected_object}...")
+                                progress_bar.progress(20)
+                                
+                                impact = sf_client.get_delete_impact_analysis(selected_object)
+                                
+                                progress_bar.progress(100)
+                                status_text.text(f"✅ Analysis complete!")
+                                
+                                st.session_state.delete_impact_results = impact
+                                st.rerun()
+                                
+                            except Exception as e:
+                                st.error(f"❌ Error: {str(e)}")
+                                import traceback
+                                st.code(traceback.format_exc())
+            
+            with col2:
+                st.subheader("📊 Impact Summary")
+                
+                if st.session_state.delete_impact_results:
+                    impact = st.session_state.delete_impact_results
+                    
+                    # Show warnings first
+                    if impact.get('warnings'):
+                        for warning in impact['warnings']:
+                            if 'CRITICAL' in warning:
+                                st.error(warning)
+                            else:
+                                st.warning(warning)
+                    
+                    # Metrics
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.metric(
+                            "CASCADE DELETE",
+                            impact.get('cascadeDeleteCount', 0),
+                            delta="Child objects will be deleted",
+                            delta_color="inverse"
+                        )
+                    with col_b:
+                        st.metric(
+                            "Orphaned Records",
+                            impact.get('orphanedRecordCount', 0),
+                            delta="Lookup references will break",
+                            delta_color="off"
+                        )
+                else:
+                    st.info("👈 Select an object and run analysis")
+            
+            # Display detailed results
+            if st.session_state.delete_impact_results:
+                impact = st.session_state.delete_impact_results
+                st.divider()
+                
+                # Show accuracy/confidence
+                if 'accuracy' in impact:
+                    acc = impact['accuracy']
+                    st.info(f"""
+                    **🎯 Accuracy Confidence: {acc['confidence']}%**
+                    - Source: {acc['source']}
+                    - Method: {acc['method']}
+                    - Note: {acc['note']}
+                    """)
+                    
+                    with st.expander("ℹ️ Accuracy Caveats"):
+                        for caveat in acc.get('caveats', []):
+                            st.markdown(f"- {caveat}")
+                
+                st.divider()
+                
+                # Generate and display hierarchical diagram
+                st.subheader("📊 Visual Impact Hierarchy")
+                
+                # Create beautiful HTML/CSS diagram
+                html_diagram = generate_visual_html_diagram(impact)
+                
+                st.markdown("""
+                **Interactive Visual Diagram:**
+                - 🔵 **Blue** = Target object you're analyzing
+                - 🔴 **Red cards** = Master-Detail (CASCADE DELETE - critical!)
+                - 🟡 **Orange cards** = Lookup (orphaned - warning)
+                - **Hover over cards** for interactive effect
+                """)
+                
+                # Render HTML using components (better for complex HTML/CSS)
+                components.html(html_diagram, height=800, scrolling=True)
+                
+                # Also provide text-based tree
+                st.divider()
+                st.subheader("📋 Text Tree Diagram")
+                st.markdown("Copy-paste friendly ASCII representation:")
+                
+                text_tree = generate_text_tree_diagram(impact)
+                st.code(text_tree, language="")
+                
+                # Detailed data tables
+                st.divider()
+                st.subheader("📊 Detailed Dependency Data")
+                
+                # Master-Detail table
+                if impact.get('masterDetailChildren'):
+                    st.markdown("#### 🔴 Master-Detail (CASCADE DELETE)")
+                    md_df = pd.DataFrame(impact['masterDetailChildren'])
+                    st.dataframe(md_df, use_container_width=True)
+                
+                # Lookup table
+                if impact.get('lookupChildren'):
+                    st.markdown("#### 🟡 Lookup (ORPHANED)")
+                    lk_df = pd.DataFrame(impact['lookupChildren'])
+                    st.dataframe(lk_df, use_container_width=True)
+                
+                # Export
+                st.divider()
+                if impact.get('allDependencies'):
+                    export_df = pd.DataFrame(impact['allDependencies'])
+                    csv = export_df.to_csv(index=False)
+                    
+                    filename = f"delete_impact_{impact['targetObject']}.csv"
+                    st.download_button(
+                        label="📥 Download Complete Impact Report (CSV)",
+                        data=csv,
+                        file_name=filename,
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+        
+        # Lookup Relationships Tab
+        with subtab3:
+            st.markdown("Discover all lookup and master-detail relationships for selected objects")
+            
+            # Initialize session state
+            if 'lookup_results' not in st.session_state:
+                st.session_state.lookup_results = None
+            
+            st.divider()
+            
+            col1, col2 = st.columns([1, 1])
+            
+            with col1:
+                st.subheader("1️⃣ Select Objects")
+                
+                # Load objects button
+                if st.button("📦 Load Objects from Org", key="lookup_load_objects", use_container_width=True):
+                    with st.spinner("Fetching objects..."):
+                        try:
+                            sf_client = SalesforceOrgScanner(
+                                instance_url=st.session_state.instance_url,
+                                access_token=st.session_state.access_token
+                            )
+                            objects = sf_client.get_all_objects()
+                            st.session_state.available_objects_lookup = objects
+                            st.success(f"✅ Loaded {len(objects)} objects")
+                        except Exception as e:
+                            st.error(f"❌ Error: {str(e)}")
+                
+                if 'available_objects_lookup' in st.session_state:
+                    object_options = {obj['label']: obj['name'] for obj in st.session_state.available_objects_lookup}
+                    selected_lookup_objects = st.multiselect(
+                        "Select Objects (multiple allowed)",
+                        options=list(object_options.keys()),
+                        key="lookup_object_selector"
+                    )
+                    
+                    if selected_lookup_objects:
+                        st.session_state.selected_lookup_objects = [object_options[label] for label in selected_lookup_objects]
+                        st.info(f"🎯 Selected: {len(selected_lookup_objects)} object(s)")
+            
+            with col2:
+                st.subheader("2️⃣ Run Analysis")
+                
+                if 'selected_lookup_objects' not in st.session_state or not st.session_state.selected_lookup_objects:
+                    st.info("👈 Select object(s) to analyze")
+                else:
+                    analyze_lookup_button = st.button(
+                        "🔗 Analyze Relationships",
+                        type="primary",
+                        use_container_width=True,
+                        key="analyze_lookup_btn"
+                    )
+                    
+                    if analyze_lookup_button:
+                        try:
+                            with st.spinner(f"Analyzing relationships for {len(st.session_state.selected_lookup_objects)} object(s)..."):
+                                sf_client = SalesforceOrgScanner(
+                                    instance_url=st.session_state.instance_url,
+                                    access_token=st.session_state.access_token
+                                )
+                                
+                                all_relationships = []
+                                
+                                for obj_name in st.session_state.selected_lookup_objects:
+                                    obj_metadata = sf_client.sf.restful(f'sobjects/{obj_name}/describe/')
+                                    
+                                    for field in obj_metadata.get('fields', []):
+                                        if field['type'] == 'reference':
+                                            rel_type = 'Master-Detail' if not field.get('nillable', True) and field.get('cascadeDelete', False) else 'Lookup'
+                                            
+                                            all_relationships.append({
+                                                'object': obj_name,
+                                                'field': field['name'],
+                                                'label': field['label'],
+                                                'type': rel_type,
+                                                'references': ', '.join(field.get('referenceTo', [])),
+                                                'required': not field.get('nillable', True),
+                                                'custom': field.get('custom', False)
+                                            })
+                                
+                                st.session_state.lookup_results = all_relationships
+                                st.success(f"✅ Found {len(all_relationships)} relationship(s)")
+                                st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Analysis failed: {str(e)}")
+            
+            # Display results
+            if st.session_state.lookup_results:
+                st.divider()
+                relationships = st.session_state.lookup_results
+                
+                st.subheader(f"🔗 Relationship Analysis")
+                st.metric("Total Relationships Found", len(relationships))
+                
+                # Filters
+                st.markdown("### 🔍 Filters")
+                filter_col1, filter_col2, filter_col3 = st.columns(3)
+                
+                with filter_col1:
+                    filter_type = st.multiselect(
+                        "Relationship Type",
+                        options=['Lookup', 'Master-Detail'],
+                        default=['Lookup', 'Master-Detail'],
+                        key="filter_rel_type"
+                    )
+                
+                with filter_col2:
+                    filter_custom = st.selectbox(
+                        "Field Type",
+                        options=['All', 'Custom Only', 'Standard Only'],
+                        key="filter_custom"
+                    )
+                
+                with filter_col3:
+                    filter_required = st.selectbox(
+                        "Required",
+                        options=['All', 'Required Only', 'Optional Only'],
+                        key="filter_required"
+                    )
+                
+                # Apply filters
+                filtered_rels = relationships
+                
+                if filter_type:
+                    filtered_rels = [r for r in filtered_rels if r['type'] in filter_type]
+                
+                if filter_custom == 'Custom Only':
+                    filtered_rels = [r for r in filtered_rels if r['custom']]
+                elif filter_custom == 'Standard Only':
+                    filtered_rels = [r for r in filtered_rels if not r['custom']]
+                
+                if filter_required == 'Required Only':
+                    filtered_rels = [r for r in filtered_rels if r['required']]
+                elif filter_required == 'Optional Only':
+                    filtered_rels = [r for r in filtered_rels if not r['required']]
+                
+                st.info(f"📊 Showing {len(filtered_rels)} of {len(relationships)} relationships")
+                
+                # Display as table
+                if filtered_rels:
+                    rel_df = pd.DataFrame(filtered_rels)
+                    st.dataframe(rel_df, use_container_width=True)
+                    
+                    # Export
+                    st.divider()
+                    csv = rel_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Relationships (CSV)",
+                        data=csv,
+                        file_name="lookup_relationships.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+                else:
+                    st.warning("No relationships match the current filters")
 
 with tab3:
     st.header("🏥 Org Health Monitoring")
     
     # Connection validation
-    can_check_health = sf_username and sf_password and sf_token
+    can_check_health = st.session_state.authenticated and st.session_state.access_token
     
     if not can_check_health:
-        st.warning("⚠️ Please enter Salesforce credentials in the sidebar to view org health")
+        st.warning("⚠️ Please login with Salesforce to view org health")
     else:
         check_health_button = st.button(
             "🔍 Check Org Health",
@@ -800,12 +1649,10 @@ with tab3:
         
         if check_health_button:
             try:
-                with st.spinner("Connecting to Salesforce..."):
+                with st.spinner("Connecting to Salesforce via OAuth..."):
                     sf_client = SalesforceOrgScanner(
-                        username=sf_username,
-                        password=sf_password,
-                        security_token=sf_token,
-                        domain=sf_domain
+                        instance_url=st.session_state.instance_url,
+                        access_token=st.session_state.access_token
                     )
                 
                 # Create tabs for different health metrics

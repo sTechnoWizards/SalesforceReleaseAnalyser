@@ -12,6 +12,7 @@ build/
 # Environment variables and secrets
 .env
 .streamlit/secrets.toml
+.pkce_storage.json
 
 # IDE
 .vscode/

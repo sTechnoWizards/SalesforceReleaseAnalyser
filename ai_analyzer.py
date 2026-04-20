@@ -1,5 +1,5 @@
 """
-AI Analyzer using Google Gemini
+AI Analyzer using Google Gemini or OpenAI
 Extracts breaking changes and analyzes component impacts
 """
 
@@ -7,10 +7,17 @@ import google.generativeai as genai
 import json
 import re
 import hashlib
+import os
+
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
 
 
 class AIAnalyzer:
-    """AI-powered analyzer using Google Gemini"""
+    """AI-powered analyzer using Google Gemini or OpenAI"""
     
     def _load_cache(self):
         """Load analysis cache from disk"""
@@ -64,29 +71,46 @@ class AIAnalyzer:
         
         return analysis
     
-    def __init__(self, api_key):
+    def __init__(self, api_key, provider='gemini'):
         """
-        Initialize Gemini AI with deterministic settings
+        Initialize AI with deterministic settings
         
         Args:
-            api_key: Google Gemini API key (free from ai.google.dev)
+            api_key: API key (Gemini from ai.google.dev or OpenAI from platform.openai.com)
+            provider: 'gemini' or 'openai'
         """
-        genai.configure(api_key=api_key)
+        self.provider = provider.lower()
+        self.api_key = api_key
         
-        # Configure for COMPLETELY deterministic results
-        generation_config = {
-            'temperature': 0.0,  # Zero = 100% deterministic (no randomness)
-            'top_p': 1.0,
-            'top_k': 1,
-        }
+        if self.provider == 'gemini':
+            genai.configure(api_key=api_key)
+            
+            # Configure for COMPLETELY deterministic results
+            generation_config = {
+                'temperature': 0.0,  # Zero = 100% deterministic (no randomness)
+                'top_p': 1.0,
+                'top_k': 1,
+            }
+            
+            self.model = genai.GenerativeModel(
+                'gemini-1.5-flash',
+                generation_config=generation_config
+            )
+            print("✅ Gemini AI initialized with 100% deterministic settings")
+            
+        elif self.provider == 'openai':
+            if not OPENAI_AVAILABLE:
+                raise ImportError("OpenAI package not installed. Run: pip install openai")
+            
+            self.client = OpenAI(api_key=api_key)
+            self.model_name = 'gpt-4o-mini'  # Fast and cost-effective
+            print(f"✅ OpenAI initialized with {self.model_name}")
         
-        self.model = genai.GenerativeModel(
-            'gemini-3-flash-preview',
-            generation_config=generation_config
-        )
+        else:
+            raise ValueError(f"Unsupported provider: {provider}. Use 'gemini' or 'openai'")
         
         # Persistent disk cache (survives app restarts)
-        self.cache_file = 'ai_analysis_cache.json'
+        self.cache_file = f'ai_analysis_cache_{self.provider}.json'
         self._analysis_cache = self._load_cache()
         
         # Critical patterns that must ALWAYS be extracted
@@ -100,7 +124,36 @@ class AIAnalyzer:
             'no longer supported'
         ]
         
-        print("✅ Gemini AI initialized with 100% deterministic settings + persistent cache")
+        print(f"✅ AI Analyzer ready with persistent cache ({self.provider})")
+    
+    def _generate_response(self, prompt):
+        """
+        Generate AI response using configured provider
+        
+        Args:
+            prompt: Text prompt for AI
+            
+        Returns:
+            Response text string
+        """
+        if self.provider == 'gemini':
+            response = self.model.generate_content(prompt)
+            return response.text
+        
+        elif self.provider == 'openai':
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": "You are a Salesforce release notes analyzer. Provide accurate, structured analysis in JSON format."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.0,  # Deterministic
+                response_format={"type": "json_object"}  # Force JSON output
+            )
+            return response.choices[0].message.content
+        
+        else:
+            raise ValueError(f"Unsupported provider: {self.provider}")
     
     def analyze_comprehensive_release(self, release_notes_text, page_map=None):
         """
@@ -223,15 +276,15 @@ Release Notes Text (first 500K chars):
 """
         
         try:
-            print("   🤖 Sending prompt to Gemini AI...")
+            print(f"   🤖 Sending prompt to {self.provider.title()} AI...")
             print(f"   📝 Prompt length: {len(prompt):,} chars")
             
-            response = self.model.generate_content(prompt)
+            response_text = self._generate_response(prompt)
             
             print("   ✅ Received response from AI")
-            print(f"   📄 Response length: {len(response.text):,} chars")
+            print(f"   📄 Response length: {len(response_text):,} chars")
             
-            result_text = response.text.strip()
+            result_text = response_text.strip()
             
             # Log first 200 chars for debugging
             print(f"   🔍 Response preview: {result_text[:200]}...")
@@ -376,10 +429,10 @@ Return ONLY valid JSON (no markdown):
 """
         
         try:
-            response = self.model.generate_content(prompt)
-            result_text = response.text.strip()
+            response_text = self._generate_response(prompt)
+            result_text = response_text.strip()
             
-            # Clean up
+            # Clean up (in case AI adds markdown)
             result_text = re.sub(r'```json\s*', '', result_text)
             result_text = re.sub(r'```\s*$', '', result_text)
             

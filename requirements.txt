@@ -3,8 +3,15 @@
 # Salesforce API client
 simple-salesforce==1.12.6
 
+# AI providers
 # Google Gemini AI
 google-generativeai==0.8.3
+
+# OpenAI (ChatGPT)
+openai>=1.12.0
+
+# HTTP requests for OAuth
+requests>=2.31.0
 
 # Web UI framework
 streamlit>=1.40.0
