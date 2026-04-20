@@ -104,11 +104,12 @@ def cleanup_old_pkce_verifiers():
 # OAuth Configuration (from environment variables or Streamlit secrets)
 # Safely check for secrets without throwing error if file doesn't exist
 try:
-    CLIENT_ID = st.secrets.get('SF_CLIENT_ID', os.getenv('SF_CLIENT_ID', ''))
-    CLIENT_SECRET = st.secrets.get('SF_CLIENT_SECRET', os.getenv('SF_CLIENT_SECRET', ''))
-    REDIRECT_URI = st.secrets.get('SF_REDIRECT_URI', os.getenv('SF_REDIRECT_URI', 'http://localhost:8501/'))
-except:
-    # No secrets file, use environment variables only
+    # Try to access Streamlit secrets (works in Streamlit Cloud)
+    CLIENT_ID = st.secrets["SF_CLIENT_ID"]
+    CLIENT_SECRET = st.secrets["SF_CLIENT_SECRET"]
+    REDIRECT_URI = st.secrets["SF_REDIRECT_URI"]
+except (KeyError, FileNotFoundError):
+    # Fall back to environment variables (local development)
     CLIENT_ID = os.getenv('SF_CLIENT_ID', '')
     CLIENT_SECRET = os.getenv('SF_CLIENT_SECRET', '')
     REDIRECT_URI = os.getenv('SF_REDIRECT_URI', 'http://localhost:8501/')
@@ -284,12 +285,23 @@ if not st.session_state.authenticated:
     if not CLIENT_ID or not CLIENT_SECRET or not REDIRECT_URI:
         st.error("⚙️ **OAuth Configuration Required**")
         st.markdown("""
-        Set these environment variables or Streamlit secrets:
-        - `SF_CLIENT_ID` - Connected App Consumer Key
-        - `SF_CLIENT_SECRET` - Connected App Consumer Secret
-        - `SF_REDIRECT_URI` - OAuth callback URL (e.g., http://localhost:8501/)
+        **For Streamlit Cloud Deployment:**
+        1. Go to https://share.streamlit.io/ → Your App → Settings (⚙️) → Secrets
+        2. Add the following (in TOML format):
         
-        See OAUTH_DEPLOYMENT_GUIDE.md for setup instructions.
+        ```toml
+        SF_CLIENT_ID = "your_consumer_key_here"
+        SF_CLIENT_SECRET = "your_consumer_secret_here"
+        SF_REDIRECT_URI = "https://salesforce-release-analyser.streamlit.app/"
+        ```
+        
+        **For Local Development:**
+        - Set environment variables in `.env` file:
+          - `SF_CLIENT_ID`
+          - `SF_CLIENT_SECRET`
+          - `SF_REDIRECT_URI`
+        
+        📖 See **OAUTH_DEPLOYMENT_GUIDE.md** for complete setup instructions.
         """)
         st.stop()
     
