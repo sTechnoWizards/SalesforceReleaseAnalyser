@@ -740,24 +740,30 @@ with tab1:
             st.exception(e)
 
 with tab2:
-    st.header("🔍 Field Usage Analysis")
-    st.markdown("Analyze where specific fields are used across all components in your org")
+    st.header("🔍 Field & Relationship Analysis")
     
     # Connection validation
     can_analyze_fields = st.session_state.authenticated and st.session_state.access_token
     
     if not can_analyze_fields:
-        st.warning("⚠️ Please login with Salesforce to analyze field usage")
+        st.warning("⚠️ Please login with Salesforce to analyze fields")
     else:
-        # Initialize session state for field analysis
-        if 'field_analysis_results' not in st.session_state:
-            st.session_state.field_analysis_results = None
-        if 'selected_objects' not in st.session_state:
-            st.session_state.selected_objects = []
-        if 'object_fields_map' not in st.session_state:
-            st.session_state.object_fields_map = {}
+        # Create sub-tabs for different analysis types
+        subtab1, subtab2, subtab3 = st.tabs(["📊 Field Usage", "🗑️ Delete Impact", "🔗 Lookup Relationships"])
         
-        st.divider()
+        # Field Usage Analysis Tab
+        with subtab1:
+            st.markdown("Analyze where specific fields are used across all components in your org")
+            
+            # Initialize session state for field analysis
+            if 'field_analysis_results' not in st.session_state:
+                st.session_state.field_analysis_results = None
+            if 'selected_objects' not in st.session_state:
+                st.session_state.selected_objects = []
+            if 'object_fields_map' not in st.session_state:
+                st.session_state.object_fields_map = {}
+            
+            st.divider()
         
         col1, col2 = st.columns([1, 1])
         
@@ -1037,6 +1043,378 @@ with tab2:
                     )
                 except ImportError:
                     st.info("💡 Install openpyxl for Excel export: pip install openpyxl")
+        
+        # Delete Impact Analysis Tab
+        with subtab2:
+            st.markdown("Analyze what happens when you delete a record - which child records cascade delete or become orphaned")
+            
+            # Initialize session state
+            if 'delete_impact_results' not in st.session_state:
+                st.session_state.delete_impact_results = None
+            
+            st.divider()
+            
+            col1, col2 = st.columns([1, 1])
+            
+            with col1:
+                st.subheader("1️⃣ Select Object to Analyze")
+                
+                # Load objects button
+                if st.button("📦 Load Objects from Org", key="delete_load_objects", use_container_width=True):
+                    with st.spinner("Fetching objects..."):
+                        try:
+                            sf_client = SalesforceOrgScanner(
+                                instance_url=st.session_state.instance_url,
+                                access_token=st.session_state.access_token
+                            )
+                            objects = sf_client.get_all_objects()
+                            st.session_state.available_objects_delete = objects
+                            st.success(f"✅ Loaded {len(objects)} objects")
+                        except Exception as e:
+                            st.error(f"❌ Error: {str(e)}")
+                
+                if 'available_objects_delete' in st.session_state:
+                    object_options = {obj['label']: obj['name'] for obj in st.session_state.available_objects_delete}
+                    selected_delete_object_label = st.selectbox(
+                        "Select Object",
+                        options=list(object_options.keys()),
+                        key="delete_object_selector"
+                    )
+                    
+                    if selected_delete_object_label:
+                        st.session_state.selected_delete_object = object_options[selected_delete_object_label]
+                        st.info(f"🎯 Analyzing: **{selected_delete_object_label}**")
+            
+            with col2:
+                st.subheader("2️⃣ Run Analysis")
+                
+                if 'selected_delete_object' not in st.session_state:
+                    st.info("👈 Select an object to analyze")
+                else:
+                    analyze_delete_button = st.button(
+                        "🗑️ Analyze Delete Impact",
+                        type="primary",
+                        use_container_width=True,
+                        key="analyze_delete_btn"
+                    )
+                    
+                    if analyze_delete_button:
+                        try:
+                            with st.spinner(f"Analyzing delete impact for {st.session_state.selected_delete_object}..."):
+                                sf_client = SalesforceOrgScanner(
+                                    instance_url=st.session_state.instance_url,
+                                    access_token=st.session_state.access_token
+                                )
+                                
+                                # Get child relationships
+                                obj_metadata = sf_client.sf.restful(f'sobjects/{st.session_state.selected_delete_object}/describe/')
+                                
+                                master_detail_deps = []
+                                lookup_deps = []
+                                restricted_deps = []
+                                
+                                for child_rel in obj_metadata.get('childRelationships', []):
+                                    if child_rel['cascadeDelete']:
+                                        master_detail_deps.append({
+                                            'object': child_rel['childSObject'],
+                                            'field': child_rel['field'],
+                                            'relationship': child_rel.get('relationshipName', 'N/A')
+                                        })
+                                    elif child_rel['restrictedDelete']:
+                                        restricted_deps.append({
+                                            'object': child_rel['childSObject'],
+                                            'field': child_rel['field'],
+                                            'relationship': child_rel.get('relationshipName', 'N/A')
+                                        })
+                                    else:
+                                        lookup_deps.append({
+                                            'object': child_rel['childSObject'],
+                                            'field': child_rel['field'],
+                                            'relationship': child_rel.get('relationshipName', 'N/A')
+                                        })
+                                
+                                st.session_state.delete_impact_results = {
+                                    'object': st.session_state.selected_delete_object,
+                                    'master_detail': master_detail_deps,
+                                    'lookup': lookup_deps,
+                                    'restricted': restricted_deps
+                                }
+                                
+                                st.success("✅ Analysis complete!")
+                                st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Analysis failed: {str(e)}")
+            
+            # Display results
+            if st.session_state.delete_impact_results:
+                st.divider()
+                results = st.session_state.delete_impact_results
+                
+                st.subheader(f"🎯 Delete Impact: {results['object']}")
+                
+                # Summary metrics
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("🔴 CASCADE DELETE", len(results['master_detail']))
+                with col2:
+                    st.metric("🟡 ORPHANED", len(results['lookup']))
+                with col3:
+                    st.metric("🛑 RESTRICTED", len(results['restricted']))
+                
+                st.divider()
+                
+                # Visual diagram
+                st.markdown("### 📊 Impact Diagram")
+                
+                diagram_html = f"""
+                <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; border-radius: 12px; color: white; margin-bottom: 20px;">
+                    <h3 style="margin: 0;">📦 {results['object']} (Target Object)</h3>
+                    <p style="margin: 5px 0 0 0; opacity: 0.9;">Analyzing deletion impact...</p>
+                </div>
+                """
+                
+                if results['master_detail']:
+                    diagram_html += """
+                    <div style="background: #fee2e2; padding: 15px; border-radius: 8px; border-left: 4px solid #dc2626; margin-bottom: 15px;">
+                        <h4 style="color: #991b1b; margin: 0 0 10px 0;">🔴 Master-Detail Dependencies (CASCADE DELETE)</h4>
+                        <p style="color: #7f1d1d; margin: 5px 0; font-size: 14px;">⚠️ These records will be PERMANENTLY DELETED</p>
+                    """
+                    for dep in results['master_detail']:
+                        diagram_html += f"""
+                        <div style="background: white; padding: 10px; margin: 8px 0; border-radius: 6px; border: 1px solid #fca5a5;">
+                            <strong style="color: #dc2626;">{dep['object']}</strong><br/>
+                            <span style="color: #6b7280; font-size: 13px;">Field: {dep['field']}</span>
+                        </div>
+                        """
+                    diagram_html += "</div>"
+                
+                if results['restricted']:
+                    diagram_html += """
+                    <div style="background: #fef3c7; padding: 15px; border-radius: 8px; border-left: 4px solid #d97706; margin-bottom: 15px;">
+                        <h4 style="color: #92400e; margin: 0 0 10px 0;">🛑 Restricted Delete (BLOCKS DELETION)</h4>
+                        <p style="color: #78350f; margin: 5px 0; font-size: 14px;">❌ Cannot delete if these records exist</p>
+                    """
+                    for dep in results['restricted']:
+                        diagram_html += f"""
+                        <div style="background: white; padding: 10px; margin: 8px 0; border-radius: 6px; border: 1px solid #fcd34d;">
+                            <strong style="color: #d97706;">{dep['object']}</strong><br/>
+                            <span style="color: #6b7280; font-size: 13px;">Field: {dep['field']}</span>
+                        </div>
+                        """
+                    diagram_html += "</div>"
+                
+                if results['lookup']:
+                    diagram_html += """
+                    <div style="background: #fed7aa; padding: 15px; border-radius: 8px; border-left: 4px solid #ea580c; margin-bottom: 15px;">
+                        <h4 style="color: #9a3412; margin: 0 0 10px 0;">🟡 Lookup Dependencies (ORPHANED)</h4>
+                        <p style="color: #7c2d12; margin: 5px 0; font-size: 14px;">⚠️ These records will remain but reference field becomes NULL</p>
+                    """
+                    for dep in results['lookup']:
+                        diagram_html += f"""
+                        <div style="background: white; padding: 10px; margin: 8px 0; border-radius: 6px; border: 1px solid #fdba74;">
+                            <strong style="color: #ea580c;">{dep['object']}</strong><br/>
+                            <span style="color: #6b7280; font-size: 13px;">Field: {dep['field']}</span>
+                        </div>
+                        """
+                    diagram_html += "</div>"
+                
+                st.markdown(diagram_html, unsafe_allow_html=True)
+                
+                # Detailed tables
+                st.markdown("### 📋 Detailed Analysis")
+                
+                if results['master_detail']:
+                    st.markdown("#### 🔴 Master-Detail (CASCADE DELETE)")
+                    md_df = pd.DataFrame(results['master_detail'])
+                    st.dataframe(md_df, use_container_width=True)
+                
+                if results['restricted']:
+                    st.markdown("#### 🛑 Restricted Delete (BLOCKS DELETION)")
+                    rest_df = pd.DataFrame(results['restricted'])
+                    st.dataframe(rest_df, use_container_width=True)
+                
+                if results['lookup']:
+                    st.markdown("#### 🟡 Lookup (ORPHANED)")
+                    lookup_df = pd.DataFrame(results['lookup'])
+                    st.dataframe(lookup_df, use_container_width=True)
+                
+                # Export button
+                st.divider()
+                all_deps = []
+                for dep in results['master_detail']:
+                    all_deps.append({**dep, 'type': 'Master-Detail (CASCADE DELETE)'})
+                for dep in results['restricted']:
+                    all_deps.append({**dep, 'type': 'Restricted Delete (BLOCKS)'})
+                for dep in results['lookup']:
+                    all_deps.append({**dep, 'type': 'Lookup (ORPHANED)'})
+                
+                if all_deps:
+                    export_df = pd.DataFrame(all_deps)
+                    csv = export_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Delete Impact Report (CSV)",
+                        data=csv,
+                        file_name=f"delete_impact_{results['object']}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+        
+        # Lookup Relationships Tab
+        with subtab3:
+            st.markdown("Discover all lookup and master-detail relationships for selected objects")
+            
+            # Initialize session state
+            if 'lookup_results' not in st.session_state:
+                st.session_state.lookup_results = None
+            
+            st.divider()
+            
+            col1, col2 = st.columns([1, 1])
+            
+            with col1:
+                st.subheader("1️⃣ Select Objects")
+                
+                # Load objects button
+                if st.button("📦 Load Objects from Org", key="lookup_load_objects", use_container_width=True):
+                    with st.spinner("Fetching objects..."):
+                        try:
+                            sf_client = SalesforceOrgScanner(
+                                instance_url=st.session_state.instance_url,
+                                access_token=st.session_state.access_token
+                            )
+                            objects = sf_client.get_all_objects()
+                            st.session_state.available_objects_lookup = objects
+                            st.success(f"✅ Loaded {len(objects)} objects")
+                        except Exception as e:
+                            st.error(f"❌ Error: {str(e)}")
+                
+                if 'available_objects_lookup' in st.session_state:
+                    object_options = {obj['label']: obj['name'] for obj in st.session_state.available_objects_lookup}
+                    selected_lookup_objects = st.multiselect(
+                        "Select Objects (multiple allowed)",
+                        options=list(object_options.keys()),
+                        key="lookup_object_selector"
+                    )
+                    
+                    if selected_lookup_objects:
+                        st.session_state.selected_lookup_objects = [object_options[label] for label in selected_lookup_objects]
+                        st.info(f"🎯 Selected: {len(selected_lookup_objects)} object(s)")
+            
+            with col2:
+                st.subheader("2️⃣ Run Analysis")
+                
+                if 'selected_lookup_objects' not in st.session_state or not st.session_state.selected_lookup_objects:
+                    st.info("👈 Select object(s) to analyze")
+                else:
+                    analyze_lookup_button = st.button(
+                        "🔗 Analyze Relationships",
+                        type="primary",
+                        use_container_width=True,
+                        key="analyze_lookup_btn"
+                    )
+                    
+                    if analyze_lookup_button:
+                        try:
+                            with st.spinner(f"Analyzing relationships for {len(st.session_state.selected_lookup_objects)} object(s)..."):
+                                sf_client = SalesforceOrgScanner(
+                                    instance_url=st.session_state.instance_url,
+                                    access_token=st.session_state.access_token
+                                )
+                                
+                                all_relationships = []
+                                
+                                for obj_name in st.session_state.selected_lookup_objects:
+                                    obj_metadata = sf_client.sf.restful(f'sobjects/{obj_name}/describe/')
+                                    
+                                    for field in obj_metadata.get('fields', []):
+                                        if field['type'] == 'reference':
+                                            rel_type = 'Master-Detail' if not field.get('nillable', True) and field.get('cascadeDelete', False) else 'Lookup'
+                                            
+                                            all_relationships.append({
+                                                'object': obj_name,
+                                                'field': field['name'],
+                                                'label': field['label'],
+                                                'type': rel_type,
+                                                'references': ', '.join(field.get('referenceTo', [])),
+                                                'required': not field.get('nillable', True),
+                                                'custom': field.get('custom', False)
+                                            })
+                                
+                                st.session_state.lookup_results = all_relationships
+                                st.success(f"✅ Found {len(all_relationships)} relationship(s)")
+                                st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Analysis failed: {str(e)}")
+            
+            # Display results
+            if st.session_state.lookup_results:
+                st.divider()
+                relationships = st.session_state.lookup_results
+                
+                st.subheader(f"🔗 Relationship Analysis")
+                st.metric("Total Relationships Found", len(relationships))
+                
+                # Filters
+                st.markdown("### 🔍 Filters")
+                filter_col1, filter_col2, filter_col3 = st.columns(3)
+                
+                with filter_col1:
+                    filter_type = st.multiselect(
+                        "Relationship Type",
+                        options=['Lookup', 'Master-Detail'],
+                        default=['Lookup', 'Master-Detail'],
+                        key="filter_rel_type"
+                    )
+                
+                with filter_col2:
+                    filter_custom = st.selectbox(
+                        "Field Type",
+                        options=['All', 'Custom Only', 'Standard Only'],
+                        key="filter_custom"
+                    )
+                
+                with filter_col3:
+                    filter_required = st.selectbox(
+                        "Required",
+                        options=['All', 'Required Only', 'Optional Only'],
+                        key="filter_required"
+                    )
+                
+                # Apply filters
+                filtered_rels = relationships
+                
+                if filter_type:
+                    filtered_rels = [r for r in filtered_rels if r['type'] in filter_type]
+                
+                if filter_custom == 'Custom Only':
+                    filtered_rels = [r for r in filtered_rels if r['custom']]
+                elif filter_custom == 'Standard Only':
+                    filtered_rels = [r for r in filtered_rels if not r['custom']]
+                
+                if filter_required == 'Required Only':
+                    filtered_rels = [r for r in filtered_rels if r['required']]
+                elif filter_required == 'Optional Only':
+                    filtered_rels = [r for r in filtered_rels if not r['required']]
+                
+                st.info(f"📊 Showing {len(filtered_rels)} of {len(relationships)} relationships")
+                
+                # Display as table
+                if filtered_rels:
+                    rel_df = pd.DataFrame(filtered_rels)
+                    st.dataframe(rel_df, use_container_width=True)
+                    
+                    # Export
+                    st.divider()
+                    csv = rel_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Relationships (CSV)",
+                        data=csv,
+                        file_name="lookup_relationships.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+                else:
+                    st.warning("No relationships match the current filters")
 
 with tab3:
     st.header("🏥 Org Health Monitoring")
