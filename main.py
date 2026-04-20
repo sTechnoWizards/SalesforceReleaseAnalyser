@@ -147,7 +147,9 @@ query_params = st.query_params
 if 'code' in query_params and not st.session_state.authenticated:
     try:
         code = query_params['code']
-        is_sandbox = query_params.get('sandbox') == 'true'
+        # Check state parameter to determine if sandbox
+        state = query_params.get('state', '')
+        is_sandbox = (state == 'sandbox')
         
         # Get the appropriate code_verifier from session state
         code_verifier = st.session_state.code_verifier_sandbox if is_sandbox else st.session_state.code_verifier_prod
@@ -226,7 +228,8 @@ if not st.session_state.authenticated:
             client_id=CLIENT_ID,
             redirect_uri=REDIRECT_URI,
             is_sandbox=False,
-            code_challenge=code_challenge_prod
+            code_challenge=code_challenge_prod,
+            state="production"  # State to identify production org
         )
         
         st.link_button(
@@ -251,9 +254,10 @@ if not st.session_state.authenticated:
         
         sandbox_auth_url = get_authorization_url(
             client_id=CLIENT_ID,
-            redirect_uri=REDIRECT_URI + "?sandbox=true",
+            redirect_uri=REDIRECT_URI,  # Keep redirect_uri consistent!
             is_sandbox=True,
-            code_challenge=code_challenge_sandbox
+            code_challenge=code_challenge_sandbox,
+            state="sandbox"  # State to identify sandbox org
         )
         
         st.link_button(

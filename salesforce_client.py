@@ -776,7 +776,7 @@ def generate_pkce_pair():
     return code_verifier, code_challenge
 
 
-def get_authorization_url(client_id, redirect_uri, is_sandbox=False, code_challenge=None):
+def get_authorization_url(client_id, redirect_uri, is_sandbox=False, code_challenge=None, state=None):
     """
     Generate the OAuth authorization URL for users to login (with PKCE support)
     
@@ -785,6 +785,7 @@ def get_authorization_url(client_id, redirect_uri, is_sandbox=False, code_challe
         redirect_uri: Callback URL (must match Connected App setting)
         is_sandbox: True for sandbox orgs, False for production
         code_challenge: PKCE code challenge (optional, recommended for security)
+        state: Optional state parameter to maintain state between request and callback
     
     Returns:
         URL string to redirect user for authentication
@@ -799,6 +800,10 @@ def get_authorization_url(client_id, redirect_uri, is_sandbox=False, code_challe
         "scope": "full refresh_token",  # Request full access and refresh token
         "prompt": "login"  # Force login screen every time
     }
+    
+    # Add state parameter if provided
+    if state:
+        params["state"] = state
     
     # Add PKCE parameters if code_challenge provided
     if code_challenge:
