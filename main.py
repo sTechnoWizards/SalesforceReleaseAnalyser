@@ -853,83 +853,83 @@ with tab2:
                 if not st.session_state.object_fields_map:
                     st.info("👈 Add objects and fields to analyze")
                 else:
-                total_fields = sum(len(fields) for fields in st.session_state.object_fields_map.values())
-                st.metric("Fields to Analyze", total_fields)
-                
-                analyze_button = st.button(
-                    "🚀 Analyze Field Usage",
-                    type="primary",
-                    use_container_width=True
-                )
-                
-                if analyze_button:
-                    try:
-                        # Create progress bar
-                        progress_bar = st.progress(0)
-                        status_text = st.empty()
-                        
-                        # Connect to Salesforce via OAuth
-                        status_text.text("🔐 Connecting to Salesforce...")
-                        progress_bar.progress(5)
-                        
-                        sf_client = SalesforceOrgScanner(
-                            instance_url=st.session_state.instance_url,
-                            access_token=st.session_state.access_token
-                        )
-                        
-                        progress_bar.progress(10)
-                        
-                        # Fetch all metadata with progress updates
-                        status_text.text("📦 Fetching Apex Classes...")
-                        progress_bar.progress(15)
-                        metadata = {'apex': sf_client.get_all_apex_classes()}
-                        
-                        status_text.text("⚡ Fetching Triggers...")
-                        progress_bar.progress(30)
-                        metadata['triggers'] = sf_client.get_all_triggers()
-                        
-                        status_text.text("💡 Fetching LWC Components...")
-                        progress_bar.progress(45)
-                        metadata['lwc'] = sf_client.get_all_lwc_components()
-                        
-                        status_text.text("🔄 Fetching Flows...")
-                        progress_bar.progress(60)
-                        metadata['flows'] = sf_client.get_all_flows()
-                        
-                        # Calculate summary
-                        metadata['summary'] = {
-                            'apex': len(metadata['apex']),
-                            'triggers': len(metadata['triggers']),
-                            'lwc': len(metadata['lwc']),
-                            'flows': len(metadata['flows'])
-                        }
-                        metadata['totalComponents'] = sum(metadata['summary'].values())
-                        
-                        progress_bar.progress(70)
-                        status_text.text(f"✅ Fetched {metadata['totalComponents']} components!")
-                        
-                        # Run field analysis
-                        status_text.text("🔬 Analyzing field usage across all components...")
-                        progress_bar.progress(75)
-                        
-                        analyzer = FieldUsageAnalyzer(sf_client)
-                        results = analyzer.analyze_field_usage(
-                            st.session_state.object_fields_map,
-                            metadata
-                        )
-                        
-                        progress_bar.progress(95)
-                        
-                        # Store results
-                        st.session_state.field_analysis_results = results
-                        st.session_state.field_analysis_summary = analyzer.get_summary()
-                        
-                        progress_bar.progress(100)
-                        status_text.text(f"✅ Analysis complete! Found {len(results)} usages")
-                        
-                    except Exception as e:
-                        st.error(f"❌ Error during analysis: {str(e)}")
-                        st.exception(e)
+                    total_fields = sum(len(fields) for fields in st.session_state.object_fields_map.values())
+                    st.metric("Fields to Analyze", total_fields)
+                    
+                    analyze_button = st.button(
+                        "🚀 Analyze Field Usage",
+                        type="primary",
+                        use_container_width=True
+                    )
+                    
+                    if analyze_button:
+                        try:
+                            # Create progress bar
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            
+                            # Connect to Salesforce via OAuth
+                            status_text.text("🔐 Connecting to Salesforce...")
+                            progress_bar.progress(5)
+                            
+                            sf_client = SalesforceOrgScanner(
+                                instance_url=st.session_state.instance_url,
+                                access_token=st.session_state.access_token
+                            )
+                            
+                            progress_bar.progress(10)
+                            
+                            # Fetch all metadata with progress updates
+                            status_text.text("📦 Fetching Apex Classes...")
+                            progress_bar.progress(15)
+                            metadata = {'apex': sf_client.get_all_apex_classes()}
+                            
+                            status_text.text("⚡ Fetching Triggers...")
+                            progress_bar.progress(30)
+                            metadata['triggers'] = sf_client.get_all_triggers()
+                            
+                            status_text.text("💡 Fetching LWC Components...")
+                            progress_bar.progress(45)
+                            metadata['lwc'] = sf_client.get_all_lwc_components()
+                            
+                            status_text.text("🔄 Fetching Flows...")
+                            progress_bar.progress(60)
+                            metadata['flows'] = sf_client.get_all_flows()
+                            
+                            # Calculate summary
+                            metadata['summary'] = {
+                                'apex': len(metadata['apex']),
+                                'triggers': len(metadata['triggers']),
+                                'lwc': len(metadata['lwc']),
+                                'flows': len(metadata['flows'])
+                            }
+                            metadata['totalComponents'] = sum(metadata['summary'].values())
+                            
+                            progress_bar.progress(70)
+                            status_text.text(f"✅ Fetched {metadata['totalComponents']} components!")
+                            
+                            # Run field analysis
+                            status_text.text("🔬 Analyzing field usage across all components...")
+                            progress_bar.progress(75)
+                            
+                            analyzer = FieldUsageAnalyzer(sf_client)
+                            results = analyzer.analyze_field_usage(
+                                st.session_state.object_fields_map,
+                                metadata
+                            )
+                            
+                            progress_bar.progress(95)
+                            
+                            # Store results
+                            st.session_state.field_analysis_results = results
+                            st.session_state.field_analysis_summary = analyzer.get_summary()
+                            
+                            progress_bar.progress(100)
+                            status_text.text(f"✅ Analysis complete! Found {len(results)} usages")
+                            
+                        except Exception as e:
+                            st.error(f"❌ Error during analysis: {str(e)}")
+                            st.exception(e)
             
             # Display results
             if st.session_state.field_analysis_results:
