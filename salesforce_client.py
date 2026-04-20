@@ -6,42 +6,63 @@ No timeouts, no governor limits - runs on your computer!
 
 from simple_salesforce import Salesforce
 import json
+import requests
 
 
 class SalesforceOrgScanner:
     """Client to fetch metadata from Salesforce org"""
     
-    def __init__(self, username, password, security_token, domain='login'):
+    def __init__(self, username=None, password=None, security_token=None, domain='login',
+                 instance_url=None, access_token=None):
         """
         Initialize Salesforce connection
         
         Args:
-            username: Salesforce username
-            password: Salesforce password
-            security_token: Security token from email
+            username: Salesforce username (for username/password auth)
+            password: Salesforce password (for username/password auth)
+            security_token: Security token from email (for username/password auth)
             domain: 'login' for production, 'test' for sandbox
+            instance_url: Salesforce instance URL (for OAuth, e.g., https://yourorg.my.salesforce.com)
+            access_token: OAuth access token (for OAuth authentication)
         """
         try:
-            print(f"🔐 Connecting to Salesforce as {username}...")
-            print(f"   Domain: {domain}.salesforce.com")
+            # OAuth authentication (preferred - secure, no credentials stored)
+            if instance_url and access_token:
+                print(f"🔐 Connecting to Salesforce via OAuth...")
+                print(f"   Instance: {instance_url}")
+                
+                self.sf = Salesforce(
+                    instance_url=instance_url,
+                    session_id=access_token
+                )
+                print("✅ Connected successfully via OAuth!")
             
-            self.sf = Salesforce(
-                username=username,
-                password=password,
-                security_token=security_token,
-                domain=domain
-            )
-            print("✅ Connected successfully!")
+            # Username/password authentication (legacy - requires security token)
+            elif username and password:
+                print(f"🔐 Connecting to Salesforce as {username}...")
+                print(f"   Domain: {domain}.salesforce.com")
+                
+                self.sf = Salesforce(
+                    username=username,
+                    password=password,
+                    security_token=security_token,
+                    domain=domain
+                )
+                print("✅ Connected successfully!")
+            
+            else:
+                raise ValueError("Must provide either (instance_url + access_token) or (username + password + security_token)")
             
         except Exception as e:
             print(f"\n❌ CONNECTION FAILED")
             print(f"Error Type: {type(e).__name__}")
             print(f"Error Message: {str(e)}")
-            print(f"\n💡 Troubleshooting:")
-            print(f"   - Check username: {username}")
-            print(f"   - Verify password is correct")
-            print(f"   - Confirm security token (Setup → Reset Security Token)")
-            print(f"   - Domain should be 'login' for prod or 'test' for sandbox")
+            if username:
+                print(f"\n💡 Troubleshooting:")
+                print(f"   - Check username: {username}")
+                print(f"   - Verify password is correct")
+                print(f"   - Confirm security token (Setup → Reset Security Token)")
+                print(f"   - Domain should be 'login' for prod or 'test' for sandbox")
             raise
     
     def get_org_limits(self):
@@ -729,6 +750,139 @@ class SalesforceOrgScanner:
             print(f"   ⚠️  Could not fetch field metadata: {str(e)[:100]}")
             # Return empty dict, will default to assuming fields are filterable
             return {}
+
+
+# ============================================================================
+# OAuth 2.0 Helper Functions (Web Server Flow)
+# ============================================================================
+
+def get_authorization_url(client_id, redirect_uri, is_sandbox=False):
+    """
+    Generate the OAuth authorization URL for users to login
+    
+    Args:
+        client_id: Connected App Consumer Key
+        redirect_uri: Callback URL (must match Connected App setting)
+        is_sandbox: True for sandbox orgs, False for production
+    
+    Returns:
+        URL string to redirect user for authentication
+    """
+    base_url = "https://test.salesforce.com" if is_sandbox else "https://login.salesforce.com"
+    auth_url = f"{base_url}/services/oauth2/authorize"
+    
+    params = {
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "scope": "full refresh_token",  # Request full access and refresh token
+        "prompt": "login"  # Force login screen every time
+    }
+    
+    # Build URL with query parameters
+    param_string = "&".join([f"{k}={requests.utils.quote(str(v))}" for k, v in params.items()])
+    return f"{auth_url}?{param_string}"
+
+
+def exchange_code_for_token(code, client_id, client_secret, redirect_uri, is_sandbox=False):
+    """
+    Exchange authorization code for access token and refresh token
+    
+    Args:
+        code: Authorization code from OAuth callback
+        client_id: Connected App Consumer Key
+        client_secret: Connected App Consumer Secret
+        redirect_uri: Callback URL (must match authorization request)
+        is_sandbox: True for sandbox orgs
+    
+    Returns:
+        Dict containing:
+            - access_token: Use this to authenticate API calls
+            - refresh_token: Use this to get new access tokens
+            - instance_url: Salesforce instance URL
+            - id: User identity URL
+            - token_type: Usually "Bearer"
+            - issued_at: Timestamp
+            - signature: Response signature
+    """
+    token_url = "https://test.salesforce.com/services/oauth2/token" if is_sandbox else "https://login.salesforce.com/services/oauth2/token"
+    
+    data = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri
+    }
+    
+    try:
+        response = requests.post(token_url, data=data, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Token exchange failed: {str(e)}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"Response: {e.response.text}")
+        raise
+
+
+def refresh_access_token(refresh_token, client_id, client_secret, is_sandbox=False):
+    """
+    Refresh an expired access token using refresh token
+    
+    Args:
+        refresh_token: Refresh token from initial authorization
+        client_id: Connected App Consumer Key
+        client_secret: Connected App Consumer Secret
+        is_sandbox: True for sandbox orgs
+    
+    Returns:
+        Dict containing new access_token and instance_url
+    """
+    token_url = "https://test.salesforce.com/services/oauth2/token" if is_sandbox else "https://login.salesforce.com/services/oauth2/token"
+    
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": client_id,
+        "client_secret": client_secret
+    }
+    
+    try:
+        response = requests.post(token_url, data=data, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Token refresh failed: {str(e)}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"Response: {e.response.text}")
+        raise
+
+
+def revoke_token(token, client_id, client_secret, is_sandbox=False):
+    """
+    Revoke an access or refresh token (logout)
+    
+    Args:
+        token: Access or refresh token to revoke
+        client_id: Connected App Consumer Key
+        client_secret: Connected App Consumer Secret
+        is_sandbox: True for sandbox orgs
+    """
+    revoke_url = "https://test.salesforce.com/services/oauth2/revoke" if is_sandbox else "https://login.salesforce.com/services/oauth2/revoke"
+    
+    data = {
+        "token": token,
+        "client_id": client_id,
+        "client_secret": client_secret
+    }
+    
+    try:
+        response = requests.post(revoke_url, data=data, timeout=30)
+        response.raise_for_status()
+        print("✅ Token revoked successfully")
+    except requests.exceptions.RequestException as e:
+        print(f"⚠️  Token revocation failed: {str(e)}")
 
 
 # Test function

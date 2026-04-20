@@ -12,7 +12,12 @@ import json
 import os
 import pandas as pd
 from dotenv import load_dotenv
-from salesforce_client import SalesforceOrgScanner
+from salesforce_client import (
+    SalesforceOrgScanner,
+    get_authorization_url,
+    exchange_code_for_token,
+    revoke_token
+)
 from ai_analyzer import AIAnalyzer
 from pattern_matcher import PatternMatcher
 from report_generator import ReportGenerator
@@ -21,6 +26,10 @@ from field_analyzer import FieldUsageAnalyzer
 # Load environment variables
 load_dotenv()
 
+# OAuth Configuration (from environment variables or Streamlit secrets)
+CLIENT_ID = os.getenv('SF_CLIENT_ID', st.secrets.get('SF_CLIENT_ID', ''))
+CLIENT_SECRET = os.getenv('SF_CLIENT_SECRET', st.secrets.get('SF_CLIENT_SECRET', ''))
+REDIRECT_URI = os.getenv('SF_REDIRECT_URI', st.secrets.get('SF_REDIRECT_URI', 'http://localhost:8501/'))
 
 # Page config
 st.set_page_config(
@@ -29,6 +38,16 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Initialize session state for OAuth
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
+if 'access_token' not in st.session_state:
+    st.session_state.access_token = None
+if 'instance_url' not in st.session_state:
+    st.session_state.instance_url = None
+if 'refresh_token' not in st.session_state:
+    st.session_state.refresh_token = None
 
 # Custom CSS
 st.markdown("""
@@ -107,6 +126,111 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# ============================================================================
+# OAuth Authentication Flow
+# ============================================================================
+
+# Handle OAuth callback
+query_params = st.query_params
+if 'code' in query_params and not st.session_state.authenticated:
+    try:
+        code = query_params['code']
+        is_sandbox = query_params.get('sandbox') == 'true'
+        
+        with st.spinner("🔐 Authenticating with Salesforce..."):
+            token_response = exchange_code_for_token(
+                code=code,
+                client_id=CLIENT_ID,
+                client_secret=CLIENT_SECRET,
+                redirect_uri=REDIRECT_URI,
+                is_sandbox=is_sandbox
+            )
+            
+            st.session_state.access_token = token_response['access_token']
+            st.session_state.instance_url = token_response['instance_url']
+            st.session_state.refresh_token = token_response.get('refresh_token')
+            st.session_state.authenticated = True
+            
+            st.query_params.clear()
+            st.rerun()
+    except Exception as e:
+        st.error(f"❌ Authentication failed: {str(e)}")
+        st.session_state.authenticated = False
+
+# Show login screen if not authenticated
+if not st.session_state.authenticated:
+    st.markdown("""
+    <div class="main-header" style="text-align: center;">
+        <h1>🚀 Salesforce Release Analyzer</h1>
+        <p>AI-powered tool to analyze Salesforce release notes and identify impacted components in your org</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.markdown("---")
+    
+    # Check OAuth configuration
+    if not CLIENT_ID or not CLIENT_SECRET or not REDIRECT_URI:
+        st.error("⚙️ **OAuth Configuration Required**")
+        st.markdown("""
+        Set these environment variables or Streamlit secrets:
+        - `SF_CLIENT_ID` - Connected App Consumer Key
+        - `SF_CLIENT_SECRET` - Connected App Consumer Secret
+        - `SF_REDIRECT_URI` - OAuth callback URL (e.g., http://localhost:8501/)
+        
+        See OAUTH_DEPLOYMENT_GUIDE.md for setup instructions.
+        """)
+        st.stop()
+    
+    # Login options
+    col1, col2, col3 = st.columns([1, 2, 1])
+    
+    with col2:
+        st.markdown("### 🔐 Sign in to get started")
+        st.markdown("Connect your Salesforce org to analyze release impacts")
+        
+        st.markdown("")  # Spacing
+        
+        # Production login
+        prod_auth_url = get_authorization_url(
+            client_id=CLIENT_ID,
+            redirect_uri=REDIRECT_URI,
+            is_sandbox=False
+        )
+        
+        st.link_button(
+            "🌐 Login with Production / Developer Org",
+            prod_auth_url,
+            use_container_width=True
+        )
+        
+        st.markdown("")  # Spacing
+        
+        # Sandbox login
+        sandbox_auth_url = get_authorization_url(
+            client_id=CLIENT_ID,
+            redirect_uri=REDIRECT_URI + "?sandbox=true",
+            is_sandbox=True
+        )
+        
+        st.link_button(
+            "🧪 Login with Sandbox Org",
+            sandbox_auth_url,
+            use_container_width=True
+        )
+        
+        st.markdown("---")
+        st.info("""
+        **🔒 Secure OAuth Authentication**
+        
+        Your credentials are never stored. You'll login via Salesforce, then return here to use the app.
+        """)
+    
+    st.stop()  # Don't render the rest of the app
+
+# ============================================================================
+# Main Application (only shown when authenticated)
+# ============================================================================
+
 # Title
 st.markdown("""
 <div class="main-header">
@@ -117,6 +241,26 @@ st.markdown("""
 
 # Sidebar - Configuration
 with st.sidebar:
+    # Show connection status and logout
+    st.success(f"✅ Connected to Salesforce")
+    st.caption(f"Instance: {st.session_state.instance_url}")
+    
+    if st.button("🚪 Logout", use_container_width=True):
+        try:
+            if st.session_state.access_token:
+                revoke_token(st.session_state.access_token, CLIENT_ID, CLIENT_SECRET)
+        except:
+            pass  # Ignore revocation errors
+        
+        # Clear session state
+        st.session_state.authenticated = False
+        st.session_state.access_token = None
+        st.session_state.instance_url = None
+        st.session_state.refresh_token = None
+        st.rerun()
+    
+    st.divider()
+    
     st.header("⚙️ Configuration")
     
     st.subheader("📁 Release Notes Input")
@@ -164,74 +308,66 @@ with st.sidebar:
     
     st.divider()
     
-    st.subheader("🔐 Salesforce Connection")
-    
-    sf_username = st.text_input(
-        "Username",
-        value=os.getenv('SF_USERNAME', ''),
-        help="Your Salesforce username (email format)"
-    )
-    
-    sf_password = st.text_input(
-        "Password",
-        type="password",
-        value=os.getenv('SF_PASSWORD', ''),
-        help="Your Salesforce password"
-    )
-    
-    sf_token = st.text_input(
-        "Security Token",
-        type="password",
-        value=os.getenv('SF_TOKEN', ''),
-        help="Security token from email (Setup → Reset Security Token)"
-    )
-    
-    sf_domain = st.selectbox(
-        "Environment",
-        ["login", "test"],
-        index=0 if os.getenv('SF_DOMAIN', 'login') == 'login' else 1,
-        help="login = Production/Developer, test = Sandbox"
-    )
-    
-    st.divider()
-    
     st.subheader("🤖 AI Configuration")
     
-    gemini_key = st.text_input(
-        "Gemini API Key",
-        type="password",
-        value=os.getenv('GEMINI_API_KEY', ''),
-        help="Get free key from ai.google.dev"
+    # AI Provider Selection
+    ai_provider = st.selectbox(
+        "AI Provider",
+        ["Gemini (Google)", "OpenAI (ChatGPT)"],
+        help="Choose which AI to use for analysis"
     )
     
-    st.markdown("""
-    <small>
-    📌 <a href="https://ai.google.dev/" target="_blank">Get free Gemini API key</a><br>
-    💡 Free tier: 1M tokens/day (enough for ~100 analyses)
-    </small>
-    """, unsafe_allow_html=True)
+    provider_key = "gemini" if "Gemini" in ai_provider else "openai"
+    
+    # API Key Input (dynamic based on provider)
+    if provider_key == "gemini":
+        api_key = st.text_input(
+            "Gemini API Key",
+            type="password",
+            value=os.getenv('GEMINI_API_KEY', ''),
+            help="Free key from ai.google.dev"
+        )
+        st.markdown("""
+        <small>
+        📌 <a href="https://ai.google.dev/" target="_blank">Get free Gemini API key</a><br>
+        💡 Free tier: 60 requests/minute
+        </small>
+        """, unsafe_allow_html=True)
+    else:
+        api_key = st.text_input(
+            "OpenAI API Key",
+            type="password",
+            value=os.getenv('OPENAI_API_KEY', ''),
+            help="API key from platform.openai.com"
+        )
+        st.markdown("""
+        <small>
+        📌 <a href="https://platform.openai.com/" target="_blank">Get OpenAI API key</a><br>
+        💡 Uses gpt-4o-mini (fast and cost-effective)
+        </small>
+        """, unsafe_allow_html=True)
     
     st.divider()
     
     # Cache management
     st.subheader("🔧 Advanced Settings")
     
-    import os
-    cache_exists = os.path.exists('ai_analysis_cache.json')
+    cache_file = f'ai_analysis_cache_{provider_key}.json'
+    cache_exists = os.path.exists(cache_file)
     if cache_exists:
         try:
-            with open('ai_analysis_cache.json', 'r') as f:
+            with open(cache_file, 'r') as f:
                 cache_data = json.load(f)
-            st.success(f"✅ Cache active: {len(cache_data)} cached analysis")
+            st.success(f"✅ Cache active: {len(cache_data)} cached analysis ({provider_key.title()})")
         except:
-            st.info("ℹ️ Cache file exists")
+            st.info(f"ℹ️ Cache file exists ({provider_key})")
     else:
-        st.info("ℹ️ No cached analyses yet")
+        st.info(f"ℹ️ No cached analyses yet ({provider_key})")
     
     if st.button("🗑️ Clear Cache", help="Force fresh analysis (ignore cached results)", use_container_width=True):
         try:
-            if os.path.exists('ai_analysis_cache.json'):
-                os.remove('ai_analysis_cache.json')
+            if os.path.exists(cache_file):
+                os.remove(cache_file)
                 st.success("✅ Cache cleared! Next analysis will be fresh.")
             else:
                 st.info("ℹ️ No cache to clear")
@@ -244,22 +380,21 @@ tab1, tab2, tab3, tab4 = st.tabs(["📊 Release Analysis", "🔍 Field Usage", "
 with tab1:
     st.header("Run Analysis")
     
-    # Validation
+    # Validation (OAuth already verified if we're here)
     can_analyze = (
         release_text and
-        sf_username and
-        sf_password and
-        sf_token and
-        gemini_key
+        api_key and
+        st.session_state.authenticated
     )
     
     if not can_analyze:
         st.warning("⚠️ Please complete all configuration in the sidebar")
-        st.info("""
+        st.info(f"""
         **Required:**
         - Release notes (PDF upload or text paste)
-        - Salesforce credentials (username, password, security token)
-        - Gemini API key (free from ai.google.dev)
+        - {ai_provider} API key
+        
+        You're already authenticated with Salesforce ✅
         """)
     
     analyze_button = st.button(
@@ -275,15 +410,13 @@ with tab1:
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            # Step 1: Connect to Salesforce
+            # Step 1: Connect to Salesforce via OAuth
             status_text.text("🔐 Connecting to Salesforce...")
             progress_bar.progress(10)
             
             sf_client = SalesforceOrgScanner(
-                sf_username,
-                sf_password,
-                sf_token,
-                sf_domain
+                instance_url=st.session_state.instance_url,
+                access_token=st.session_state.access_token
             )
             
             # Step 2: Fetch metadata
@@ -296,10 +429,10 @@ with tab1:
             progress_bar.progress(40)
             
             # Step 3: AI comprehensive analysis of release notes
-            status_text.text("🤖 AI performing comprehensive release analysis...")
+            status_text.text(f"🤖 AI ({ai_provider}) performing comprehensive release analysis...")
             progress_bar.progress(50)
             
-            ai_analyzer = AIAnalyzer(gemini_key)
+            ai_analyzer = AIAnalyzer(api_key, provider=provider_key)
             page_map = st.session_state.get('page_map', None)
             release_analysis = ai_analyzer.analyze_comprehensive_release(release_text, page_map)
             
@@ -510,10 +643,8 @@ with tab2:
                 with st.spinner("Fetching objects..."):
                     try:
                         sf_client = SalesforceOrgScanner(
-                            username=sf_username,
-                            password=sf_password,
-                            security_token=sf_token,
-                            domain=sf_domain
+                            instance_url=st.session_state.instance_url,
+                            access_token=st.session_state.access_token
                         )
                         objects = sf_client.get_all_objects()
                         st.session_state.available_objects = objects
@@ -605,15 +736,13 @@ with tab2:
                         progress_bar = st.progress(0)
                         status_text = st.empty()
                         
-                        # Connect to Salesforce
+                        # Connect to Salesforce via OAuth
                         status_text.text("🔐 Connecting to Salesforce...")
                         progress_bar.progress(5)
                         
                         sf_client = SalesforceOrgScanner(
-                            username=sf_username,
-                            password=sf_password,
-                            security_token=sf_token,
-                            domain=sf_domain
+                            instance_url=st.session_state.instance_url,
+                            access_token=st.session_state.access_token
                         )
                         
                         progress_bar.progress(10)
@@ -800,12 +929,10 @@ with tab3:
         
         if check_health_button:
             try:
-                with st.spinner("Connecting to Salesforce..."):
+                with st.spinner("Connecting to Salesforce via OAuth..."):
                     sf_client = SalesforceOrgScanner(
-                        username=sf_username,
-                        password=sf_password,
-                        security_token=sf_token,
-                        domain=sf_domain
+                        instance_url=st.session_state.instance_url,
+                        access_token=st.session_state.access_token
                     )
                 
                 # Create tabs for different health metrics
