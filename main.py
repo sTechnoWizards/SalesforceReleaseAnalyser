@@ -218,9 +218,51 @@ st.markdown("""
 # ============================================================================
 # OAuth Authentication Flow
 # ============================================================================
+# OAuth Authentication Flow
+# ============================================================================
 
 # Handle OAuth callback
 query_params = st.query_params
+
+# Check for OAuth errors first
+if 'error' in query_params:
+    error = query_params.get('error', '')
+    error_description = query_params.get('error_description', '')
+    
+    st.error(f"❌ OAuth Error: {error}")
+    
+    if error == 'redirect_uri_mismatch':
+        st.error("**Redirect URI Mismatch**")
+        st.markdown(f"""
+        The redirect URI doesn't match what's configured in your Salesforce Connected App.
+        
+        **Current Redirect URI:** `{REDIRECT_URI}`
+        
+        **Fix this:**
+        1. Go to your **Salesforce org** (the one where you created the Connected App)
+        2. Setup → App Manager → Find your Connected App → Edit
+        3. In **Callback URL** field, add this EXACT URL:
+        ```
+        {REDIRECT_URI}
+        ```
+        4. Make sure there's NO extra spaces, and the trailing slash matches exactly
+        5. Also add localhost for development:
+        ```
+        http://localhost:8501/
+        ```
+        6. Save and wait 2-3 minutes for Salesforce to update
+        
+        **Note:** If your Connected App is in a SANDBOX org, make sure you're logging into that same sandbox.
+        If it's in PRODUCTION, you can use it for both production and sandbox logins.
+        """)
+    else:
+        st.info(f"Description: {error_description}")
+    
+    if st.button("🔄 Try Again", use_container_width=True):
+        st.query_params.clear()
+        st.rerun()
+    st.stop()
+
 if 'code' in query_params and not st.session_state.authenticated:
     try:
         code = query_params['code']
@@ -304,6 +346,12 @@ if not st.session_state.authenticated:
         📖 See **OAUTH_DEPLOYMENT_GUIDE.md** for complete setup instructions.
         """)
         st.stop()
+    
+    # Debug info (helpful for troubleshooting)
+    with st.expander("🔍 OAuth Debug Info"):
+        st.code(f"Redirect URI: {REDIRECT_URI}")
+        st.code(f"Client ID: {CLIENT_ID[:20]}...{CLIENT_ID[-10:]}")
+        st.info("⚠️ Make sure this EXACT redirect URI is in your Salesforce Connected App Callback URLs")
     
     # Login options
     col1, col2, col3 = st.columns([1, 2, 1])
