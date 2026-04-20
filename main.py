@@ -1290,21 +1290,23 @@ with tab2:
         
         # Delete Impact Analysis Tab
         with subtab2:
-            st.markdown("Analyze what happens when you delete a record - which child records cascade delete or become orphaned")
+            st.markdown("### 💥 Delete Impact Analysis")
+            st.markdown("**Discover what will be CASCADE DELETED if you delete an object**")
+            st.markdown("Find Master-Detail dependencies and orphaned lookup relationships")
+            
+            st.divider()
             
             # Initialize session state
             if 'delete_impact_results' not in st.session_state:
                 st.session_state.delete_impact_results = None
             
-            st.divider()
-            
             col1, col2 = st.columns([1, 1])
             
             with col1:
-                st.subheader("1️⃣ Select Object to Analyze")
+                st.subheader("Select Object to Analyze")
                 
-                # Load objects button
-                if st.button("📦 Load Objects from Org", key="delete_load_objects", use_container_width=True):
+                # Fetch objects button
+                if st.button("📦 Load Objects from Org", key="load_objects_impact", use_container_width=True):
                     with st.spinner("Fetching objects..."):
                         try:
                             sf_client = SalesforceOrgScanner(
@@ -1312,193 +1314,163 @@ with tab2:
                                 access_token=st.session_state.access_token
                             )
                             objects = sf_client.get_all_objects()
-                            st.session_state.available_objects_delete = objects
+                            st.session_state.available_objects_impact = objects
                             st.success(f"✅ Loaded {len(objects)} objects")
                         except Exception as e:
                             st.error(f"❌ Error: {str(e)}")
                 
-                if 'available_objects_delete' in st.session_state:
-                    object_options = {obj['label']: obj['name'] for obj in st.session_state.available_objects_delete}
-                    selected_delete_object_label = st.selectbox(
-                        "Select Object",
+                # Object selection
+                if 'available_objects_impact' in st.session_state:
+                    object_options = {obj['label']: obj['name'] for obj in st.session_state.available_objects_impact}
+                    
+                    # Single select for impact analysis (more focused)
+                    selected_object_label = st.selectbox(
+                        "Choose object to analyze delete impact",
                         options=list(object_options.keys()),
-                        key="delete_object_selector"
+                        key="impact_object_selector",
+                        help="Select the object you're considering deleting"
                     )
                     
-                    if selected_delete_object_label:
-                        st.session_state.selected_delete_object = object_options[selected_delete_object_label]
-                        st.info(f"🎯 Analyzing: **{selected_delete_object_label}**")
-            
-            with col2:
-                st.subheader("2️⃣ Run Analysis")
-                
-                if 'selected_delete_object' not in st.session_state:
-                    st.info("👈 Select an object to analyze")
-                else:
-                    analyze_delete_button = st.button(
-                        "🗑️ Analyze Delete Impact",
-                        type="primary",
-                        use_container_width=True,
-                        key="analyze_delete_btn"
-                    )
-                    
-                    if analyze_delete_button:
-                        try:
-                            with st.spinner(f"Analyzing delete impact for {st.session_state.selected_delete_object}..."):
+                    if selected_object_label:
+                        selected_object = object_options[selected_object_label]
+                        
+                        st.warning(f"⚠️ **Analyzing:** What happens if you delete `{selected_object}`?")
+                        
+                        if st.button("💥 Analyze Delete Impact", type="primary", use_container_width=True):
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            
+                            try:
+                                status_text.text("🔐 Connecting to Salesforce...")
+                                progress_bar.progress(10)
+                                
                                 sf_client = SalesforceOrgScanner(
                                     instance_url=st.session_state.instance_url,
                                     access_token=st.session_state.access_token
                                 )
                                 
-                                # Get child relationships
-                                obj_metadata = sf_client.sf.restful(f'sobjects/{st.session_state.selected_delete_object}/describe/')
+                                status_text.text(f"🔍 Scanning all objects for dependencies on {selected_object}...")
+                                progress_bar.progress(20)
                                 
-                                master_detail_deps = []
-                                lookup_deps = []
-                                restricted_deps = []
+                                impact = sf_client.get_delete_impact_analysis(selected_object)
                                 
-                                for child_rel in obj_metadata.get('childRelationships', []):
-                                    if child_rel['cascadeDelete']:
-                                        master_detail_deps.append({
-                                            'object': child_rel['childSObject'],
-                                            'field': child_rel['field'],
-                                            'relationship': child_rel.get('relationshipName', 'N/A')
-                                        })
-                                    elif child_rel['restrictedDelete']:
-                                        restricted_deps.append({
-                                            'object': child_rel['childSObject'],
-                                            'field': child_rel['field'],
-                                            'relationship': child_rel.get('relationshipName', 'N/A')
-                                        })
-                                    else:
-                                        lookup_deps.append({
-                                            'object': child_rel['childSObject'],
-                                            'field': child_rel['field'],
-                                            'relationship': child_rel.get('relationshipName', 'N/A')
-                                        })
+                                progress_bar.progress(100)
+                                status_text.text(f"✅ Analysis complete!")
                                 
-                                st.session_state.delete_impact_results = {
-                                    'object': st.session_state.selected_delete_object,
-                                    'master_detail': master_detail_deps,
-                                    'lookup': lookup_deps,
-                                    'restricted': restricted_deps
-                                }
-                                
-                                st.success("✅ Analysis complete!")
+                                st.session_state.delete_impact_results = impact
                                 st.rerun()
-                        except Exception as e:
-                            st.error(f"❌ Analysis failed: {str(e)}")
+                                
+                            except Exception as e:
+                                st.error(f"❌ Error: {str(e)}")
+                                import traceback
+                                st.code(traceback.format_exc())
             
-            # Display results
+            with col2:
+                st.subheader("📊 Impact Summary")
+                
+                if st.session_state.delete_impact_results:
+                    impact = st.session_state.delete_impact_results
+                    
+                    # Show warnings first
+                    if impact.get('warnings'):
+                        for warning in impact['warnings']:
+                            if 'CRITICAL' in warning:
+                                st.error(warning)
+                            else:
+                                st.warning(warning)
+                    
+                    # Metrics
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.metric(
+                            "CASCADE DELETE",
+                            impact.get('cascadeDeleteCount', 0),
+                            delta="Child objects will be deleted",
+                            delta_color="inverse"
+                        )
+                    with col_b:
+                        st.metric(
+                            "Orphaned Records",
+                            impact.get('orphanedRecordCount', 0),
+                            delta="Lookup references will break",
+                            delta_color="off"
+                        )
+                else:
+                    st.info("👈 Select an object and run analysis")
+            
+            # Display detailed results
             if st.session_state.delete_impact_results:
-                st.divider()
-                results = st.session_state.delete_impact_results
-                
-                st.subheader(f"🎯 Delete Impact: {results['object']}")
-                
-                # Summary metrics
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("🔴 CASCADE DELETE", len(results['master_detail']))
-                with col2:
-                    st.metric("🟡 ORPHANED", len(results['lookup']))
-                with col3:
-                    st.metric("🛑 RESTRICTED", len(results['restricted']))
-                
+                impact = st.session_state.delete_impact_results
                 st.divider()
                 
-                # Visual diagram
-                st.markdown("### 📊 Impact Diagram")
+                # Show accuracy/confidence
+                if 'accuracy' in impact:
+                    acc = impact['accuracy']
+                    st.info(f"""
+                    **🎯 Accuracy Confidence: {acc['confidence']}%**
+                    - Source: {acc['source']}
+                    - Method: {acc['method']}
+                    - Note: {acc['note']}
+                    """)
+                    
+                    with st.expander("ℹ️ Accuracy Caveats"):
+                        for caveat in acc.get('caveats', []):
+                            st.markdown(f"- {caveat}")
                 
-                diagram_html = f"""
-                <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; border-radius: 12px; color: white; margin-bottom: 20px;">
-                    <h3 style="margin: 0;">📦 {results['object']} (Target Object)</h3>
-                    <p style="margin: 5px 0 0 0; opacity: 0.9;">Analyzing deletion impact...</p>
-                </div>
-                """
+                st.divider()
                 
-                if results['master_detail']:
-                    diagram_html += """
-                    <div style="background: #fee2e2; padding: 15px; border-radius: 8px; border-left: 4px solid #dc2626; margin-bottom: 15px;">
-                        <h4 style="color: #991b1b; margin: 0 0 10px 0;">🔴 Master-Detail Dependencies (CASCADE DELETE)</h4>
-                        <p style="color: #7f1d1d; margin: 5px 0; font-size: 14px;">⚠️ These records will be PERMANENTLY DELETED</p>
-                    """
-                    for dep in results['master_detail']:
-                        diagram_html += f"""
-                        <div style="background: white; padding: 10px; margin: 8px 0; border-radius: 6px; border: 1px solid #fca5a5;">
-                            <strong style="color: #dc2626;">{dep['object']}</strong><br/>
-                            <span style="color: #6b7280; font-size: 13px;">Field: {dep['field']}</span>
-                        </div>
-                        """
-                    diagram_html += "</div>"
+                # Generate and display hierarchical diagram
+                st.subheader("📊 Visual Impact Hierarchy")
                 
-                if results['restricted']:
-                    diagram_html += """
-                    <div style="background: #fef3c7; padding: 15px; border-radius: 8px; border-left: 4px solid #d97706; margin-bottom: 15px;">
-                        <h4 style="color: #92400e; margin: 0 0 10px 0;">🛑 Restricted Delete (BLOCKS DELETION)</h4>
-                        <p style="color: #78350f; margin: 5px 0; font-size: 14px;">❌ Cannot delete if these records exist</p>
-                    """
-                    for dep in results['restricted']:
-                        diagram_html += f"""
-                        <div style="background: white; padding: 10px; margin: 8px 0; border-radius: 6px; border: 1px solid #fcd34d;">
-                            <strong style="color: #d97706;">{dep['object']}</strong><br/>
-                            <span style="color: #6b7280; font-size: 13px;">Field: {dep['field']}</span>
-                        </div>
-                        """
-                    diagram_html += "</div>"
+                # Create beautiful HTML/CSS diagram
+                html_diagram = generate_visual_html_diagram(impact)
                 
-                if results['lookup']:
-                    diagram_html += """
-                    <div style="background: #fed7aa; padding: 15px; border-radius: 8px; border-left: 4px solid #ea580c; margin-bottom: 15px;">
-                        <h4 style="color: #9a3412; margin: 0 0 10px 0;">🟡 Lookup Dependencies (ORPHANED)</h4>
-                        <p style="color: #7c2d12; margin: 5px 0; font-size: 14px;">⚠️ These records will remain but reference field becomes NULL</p>
-                    """
-                    for dep in results['lookup']:
-                        diagram_html += f"""
-                        <div style="background: white; padding: 10px; margin: 8px 0; border-radius: 6px; border: 1px solid #fdba74;">
-                            <strong style="color: #ea580c;">{dep['object']}</strong><br/>
-                            <span style="color: #6b7280; font-size: 13px;">Field: {dep['field']}</span>
-                        </div>
-                        """
-                    diagram_html += "</div>"
+                st.markdown("""
+                **Interactive Visual Diagram:**
+                - 🔵 **Blue** = Target object you're analyzing
+                - 🔴 **Red cards** = Master-Detail (CASCADE DELETE - critical!)
+                - 🟡 **Orange cards** = Lookup (orphaned - warning)
+                - **Hover over cards** for interactive effect
+                """)
                 
-                st.markdown(diagram_html, unsafe_allow_html=True)
+                # Render HTML using components (better for complex HTML/CSS)
+                components.html(html_diagram, height=800, scrolling=True)
                 
-                # Detailed tables
-                st.markdown("### 📋 Detailed Analysis")
+                # Also provide text-based tree
+                st.divider()
+                st.subheader("📋 Text Tree Diagram")
+                st.markdown("Copy-paste friendly ASCII representation:")
                 
-                if results['master_detail']:
+                text_tree = generate_text_tree_diagram(impact)
+                st.code(text_tree, language="")
+                
+                # Detailed data tables
+                st.divider()
+                st.subheader("📊 Detailed Dependency Data")
+                
+                # Master-Detail table
+                if impact.get('masterDetailChildren'):
                     st.markdown("#### 🔴 Master-Detail (CASCADE DELETE)")
-                    md_df = pd.DataFrame(results['master_detail'])
+                    md_df = pd.DataFrame(impact['masterDetailChildren'])
                     st.dataframe(md_df, use_container_width=True)
                 
-                if results['restricted']:
-                    st.markdown("#### 🛑 Restricted Delete (BLOCKS DELETION)")
-                    rest_df = pd.DataFrame(results['restricted'])
-                    st.dataframe(rest_df, use_container_width=True)
-                
-                if results['lookup']:
+                # Lookup table
+                if impact.get('lookupChildren'):
                     st.markdown("#### 🟡 Lookup (ORPHANED)")
-                    lookup_df = pd.DataFrame(results['lookup'])
-                    st.dataframe(lookup_df, use_container_width=True)
+                    lk_df = pd.DataFrame(impact['lookupChildren'])
+                    st.dataframe(lk_df, use_container_width=True)
                 
-                # Export button
+                # Export
                 st.divider()
-                all_deps = []
-                for dep in results['master_detail']:
-                    all_deps.append({**dep, 'type': 'Master-Detail (CASCADE DELETE)'})
-                for dep in results['restricted']:
-                    all_deps.append({**dep, 'type': 'Restricted Delete (BLOCKS)'})
-                for dep in results['lookup']:
-                    all_deps.append({**dep, 'type': 'Lookup (ORPHANED)'})
-                
-                if all_deps:
-                    export_df = pd.DataFrame(all_deps)
+                if impact.get('allDependencies'):
+                    export_df = pd.DataFrame(impact['allDependencies'])
                     csv = export_df.to_csv(index=False)
+                    
+                    filename = f"delete_impact_{impact['targetObject']}.csv"
                     st.download_button(
-                        label="📥 Download Delete Impact Report (CSV)",
+                        label="📥 Download Complete Impact Report (CSV)",
                         data=csv,
-                        file_name=f"delete_impact_{results['object']}.csv",
+                        file_name=filename,
                         mime="text/csv",
                         use_container_width=True
                     )
