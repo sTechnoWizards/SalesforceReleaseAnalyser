@@ -7,6 +7,9 @@ No timeouts, no governor limits - runs on your computer!
 from simple_salesforce import Salesforce
 import json
 import requests
+import hashlib
+import base64
+import secrets
 
 
 class SalesforceOrgScanner:
@@ -753,17 +756,35 @@ class SalesforceOrgScanner:
 
 
 # ============================================================================
-# OAuth 2.0 Helper Functions (Web Server Flow)
+# OAuth 2.0 Helper Functions (Web Server Flow with PKCE)
 # ============================================================================
 
-def get_authorization_url(client_id, redirect_uri, is_sandbox=False):
+def generate_pkce_pair():
     """
-    Generate the OAuth authorization URL for users to login
+    Generate PKCE code_verifier and code_challenge
+    
+    Returns:
+        tuple: (code_verifier, code_challenge)
+    """
+    # Generate code_verifier: random 43-128 character string
+    code_verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode('utf-8').rstrip('=')
+    
+    # Generate code_challenge: SHA256 hash of code_verifier
+    code_challenge_bytes = hashlib.sha256(code_verifier.encode('utf-8')).digest()
+    code_challenge = base64.urlsafe_b64encode(code_challenge_bytes).decode('utf-8').rstrip('=')
+    
+    return code_verifier, code_challenge
+
+
+def get_authorization_url(client_id, redirect_uri, is_sandbox=False, code_challenge=None):
+    """
+    Generate the OAuth authorization URL for users to login (with PKCE support)
     
     Args:
         client_id: Connected App Consumer Key
         redirect_uri: Callback URL (must match Connected App setting)
         is_sandbox: True for sandbox orgs, False for production
+        code_challenge: PKCE code challenge (optional, recommended for security)
     
     Returns:
         URL string to redirect user for authentication
@@ -779,12 +800,17 @@ def get_authorization_url(client_id, redirect_uri, is_sandbox=False):
         "prompt": "login"  # Force login screen every time
     }
     
+    # Add PKCE parameters if code_challenge provided
+    if code_challenge:
+        params["code_challenge"] = code_challenge
+        params["code_challenge_method"] = "S256"  # SHA256
+    
     # Build URL with query parameters
     param_string = "&".join([f"{k}={requests.utils.quote(str(v))}" for k, v in params.items()])
     return f"{auth_url}?{param_string}"
 
 
-def exchange_code_for_token(code, client_id, client_secret, redirect_uri, is_sandbox=False):
+def exchange_code_for_token(code, client_id, client_secret, redirect_uri, is_sandbox=False, code_verifier=None):
     """
     Exchange authorization code for access token and refresh token
     
@@ -814,6 +840,10 @@ def exchange_code_for_token(code, client_id, client_secret, redirect_uri, is_san
         "client_secret": client_secret,
         "redirect_uri": redirect_uri
     }
+    
+    # Add PKCE code_verifier if provided
+    if code_verifier:
+        data["code_verifier"] = code_verifier
     
     try:
         response = requests.post(token_url, data=data, timeout=30)

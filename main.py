@@ -16,7 +16,8 @@ from salesforce_client import (
     SalesforceOrgScanner,
     get_authorization_url,
     exchange_code_for_token,
-    revoke_token
+    revoke_token,
+    generate_pkce_pair
 )
 from ai_analyzer import AIAnalyzer
 from pattern_matcher import PatternMatcher
@@ -27,9 +28,16 @@ from field_analyzer import FieldUsageAnalyzer
 load_dotenv()
 
 # OAuth Configuration (from environment variables or Streamlit secrets)
-CLIENT_ID = os.getenv('SF_CLIENT_ID', st.secrets.get('SF_CLIENT_ID', ''))
-CLIENT_SECRET = os.getenv('SF_CLIENT_SECRET', st.secrets.get('SF_CLIENT_SECRET', ''))
-REDIRECT_URI = os.getenv('SF_REDIRECT_URI', st.secrets.get('SF_REDIRECT_URI', 'http://localhost:8501/'))
+# Safely check for secrets without throwing error if file doesn't exist
+try:
+    CLIENT_ID = st.secrets.get('SF_CLIENT_ID', os.getenv('SF_CLIENT_ID', ''))
+    CLIENT_SECRET = st.secrets.get('SF_CLIENT_SECRET', os.getenv('SF_CLIENT_SECRET', ''))
+    REDIRECT_URI = st.secrets.get('SF_REDIRECT_URI', os.getenv('SF_REDIRECT_URI', 'http://localhost:8501/'))
+except:
+    # No secrets file, use environment variables only
+    CLIENT_ID = os.getenv('SF_CLIENT_ID', '')
+    CLIENT_SECRET = os.getenv('SF_CLIENT_SECRET', '')
+    REDIRECT_URI = os.getenv('SF_REDIRECT_URI', 'http://localhost:8501/')
 
 # Page config
 st.set_page_config(
@@ -48,6 +56,10 @@ if 'instance_url' not in st.session_state:
     st.session_state.instance_url = None
 if 'refresh_token' not in st.session_state:
     st.session_state.refresh_token = None
+if 'code_verifier_prod' not in st.session_state:
+    st.session_state.code_verifier_prod = None
+if 'code_verifier_sandbox' not in st.session_state:
+    st.session_state.code_verifier_sandbox = None
 
 # Custom CSS
 st.markdown("""
@@ -137,19 +149,27 @@ if 'code' in query_params and not st.session_state.authenticated:
         code = query_params['code']
         is_sandbox = query_params.get('sandbox') == 'true'
         
+        # Get the appropriate code_verifier from session state
+        code_verifier = st.session_state.code_verifier_sandbox if is_sandbox else st.session_state.code_verifier_prod
+        
         with st.spinner("🔐 Authenticating with Salesforce..."):
             token_response = exchange_code_for_token(
                 code=code,
                 client_id=CLIENT_ID,
                 client_secret=CLIENT_SECRET,
                 redirect_uri=REDIRECT_URI,
-                is_sandbox=is_sandbox
+                is_sandbox=is_sandbox,
+                code_verifier=code_verifier
             )
             
             st.session_state.access_token = token_response['access_token']
             st.session_state.instance_url = token_response['instance_url']
             st.session_state.refresh_token = token_response.get('refresh_token')
             st.session_state.authenticated = True
+            
+            # Clear code_verifiers after successful auth
+            st.session_state.code_verifier_prod = None
+            st.session_state.code_verifier_sandbox = None
             
             st.query_params.clear()
             st.rerun()
@@ -190,11 +210,23 @@ if not st.session_state.authenticated:
         
         st.markdown("")  # Spacing
         
-        # Production login
+        # Production login with PKCE
+        if st.session_state.code_verifier_prod is None:
+            code_verifier_prod, code_challenge_prod = generate_pkce_pair()
+            st.session_state.code_verifier_prod = code_verifier_prod
+        else:
+            code_verifier_prod = st.session_state.code_verifier_prod
+            # Regenerate code_challenge from stored verifier
+            import hashlib
+            import base64
+            code_challenge_bytes = hashlib.sha256(code_verifier_prod.encode('utf-8')).digest()
+            code_challenge_prod = base64.urlsafe_b64encode(code_challenge_bytes).decode('utf-8').rstrip('=')
+        
         prod_auth_url = get_authorization_url(
             client_id=CLIENT_ID,
             redirect_uri=REDIRECT_URI,
-            is_sandbox=False
+            is_sandbox=False,
+            code_challenge=code_challenge_prod
         )
         
         st.link_button(
@@ -205,11 +237,23 @@ if not st.session_state.authenticated:
         
         st.markdown("")  # Spacing
         
-        # Sandbox login
+        # Sandbox login with PKCE
+        if st.session_state.code_verifier_sandbox is None:
+            code_verifier_sandbox, code_challenge_sandbox = generate_pkce_pair()
+            st.session_state.code_verifier_sandbox = code_verifier_sandbox
+        else:
+            code_verifier_sandbox = st.session_state.code_verifier_sandbox
+            # Regenerate code_challenge from stored verifier
+            import hashlib
+            import base64
+            code_challenge_bytes = hashlib.sha256(code_verifier_sandbox.encode('utf-8')).digest()
+            code_challenge_sandbox = base64.urlsafe_b64encode(code_challenge_bytes).decode('utf-8').rstrip('=')
+        
         sandbox_auth_url = get_authorization_url(
             client_id=CLIENT_ID,
             redirect_uri=REDIRECT_URI + "?sandbox=true",
-            is_sandbox=True
+            is_sandbox=True,
+            code_challenge=code_challenge_sandbox
         )
         
         st.link_button(
