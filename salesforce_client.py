@@ -10,7 +10,17 @@ import requests
 import hashlib
 import base64
 import secrets
+import os
+import urllib3
 
+# SSL Certificate Verification Control
+# Set SSL_VERIFY=false in .env if behind corporate proxy with SSL inspection
+SSL_VERIFY = os.getenv('SSL_VERIFY', 'true').lower() != 'false'
+
+if not SSL_VERIFY:
+    # Disable SSL warnings when verification is disabled
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    print("⚠️  SSL certificate verification disabled (corporate network mode)")
 
 class SalesforceOrgScanner:
     """Client to fetch metadata from Salesforce org"""
@@ -34,9 +44,14 @@ class SalesforceOrgScanner:
                 print(f"🔐 Connecting to Salesforce via OAuth...")
                 print(f"   Instance: {instance_url}")
                 
+                # Create session with SSL verification control
+                session = requests.Session()
+                session.verify = SSL_VERIFY
+                
                 self.sf = Salesforce(
                     instance_url=instance_url,
-                    session_id=access_token
+                    session_id=access_token,
+                    session=session
                 )
                 print("✅ Connected successfully via OAuth!")
             
@@ -45,11 +60,16 @@ class SalesforceOrgScanner:
                 print(f"🔐 Connecting to Salesforce as {username}...")
                 print(f"   Domain: {domain}.salesforce.com")
                 
+                # Create session with SSL verification control
+                session = requests.Session()
+                session.verify = SSL_VERIFY
+                
                 self.sf = Salesforce(
                     username=username,
                     password=password,
                     security_token=security_token,
-                    domain=domain
+                    domain=domain,
+                    session=session
                 )
                 print("✅ Connected successfully!")
             
@@ -851,7 +871,7 @@ def exchange_code_for_token(code, client_id, client_secret, redirect_uri, is_san
         data["code_verifier"] = code_verifier
     
     try:
-        response = requests.post(token_url, data=data, timeout=30)
+        response = requests.post(token_url, data=data, timeout=30, verify=SSL_VERIFY)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
@@ -884,7 +904,7 @@ def refresh_access_token(refresh_token, client_id, client_secret, is_sandbox=Fal
     }
     
     try:
-        response = requests.post(token_url, data=data, timeout=30)
+        response = requests.post(token_url, data=data, timeout=30, verify=SSL_VERIFY)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
@@ -913,7 +933,7 @@ def revoke_token(token, client_id, client_secret, is_sandbox=False):
     }
     
     try:
-        response = requests.post(revoke_url, data=data, timeout=30)
+        response = requests.post(revoke_url, data=data, timeout=30, verify=SSL_VERIFY)
         response.raise_for_status()
         print("✅ Token revoked successfully")
     except requests.exceptions.RequestException as e:
