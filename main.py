@@ -56,10 +56,17 @@ if 'instance_url' not in st.session_state:
     st.session_state.instance_url = None
 if 'refresh_token' not in st.session_state:
     st.session_state.refresh_token = None
-if 'code_verifier_prod' not in st.session_state:
-    st.session_state.code_verifier_prod = None
-if 'code_verifier_sandbox' not in st.session_state:
-    st.session_state.code_verifier_sandbox = None
+
+# Generate PKCE pairs once per session and store both verifier and challenge
+if 'pkce_prod' not in st.session_state or st.session_state.pkce_prod is None:
+    from salesforce_client import generate_pkce_pair
+    verifier, challenge = generate_pkce_pair()
+    st.session_state.pkce_prod = {'verifier': verifier, 'challenge': challenge}
+
+if 'pkce_sandbox' not in st.session_state or st.session_state.pkce_sandbox is None:
+    from salesforce_client import generate_pkce_pair
+    verifier, challenge = generate_pkce_pair()
+    st.session_state.pkce_sandbox = {'verifier': verifier, 'challenge': challenge}
 
 # Custom CSS
 st.markdown("""
@@ -152,7 +159,10 @@ if 'code' in query_params and not st.session_state.authenticated:
         is_sandbox = (state == 'sandbox')
         
         # Get the appropriate code_verifier from session state
-        code_verifier = st.session_state.code_verifier_sandbox if is_sandbox else st.session_state.code_verifier_prod
+        if is_sandbox:
+            code_verifier = st.session_state.pkce_sandbox['verifier']
+        else:
+            code_verifier = st.session_state.pkce_prod['verifier']
         
         with st.spinner("🔐 Authenticating with Salesforce..."):
             token_response = exchange_code_for_token(
@@ -169,14 +179,21 @@ if 'code' in query_params and not st.session_state.authenticated:
             st.session_state.refresh_token = token_response.get('refresh_token')
             st.session_state.authenticated = True
             
-            # Clear code_verifiers after successful auth
-            st.session_state.code_verifier_prod = None
-            st.session_state.code_verifier_sandbox = None
+            # Clear PKCE pairs after successful auth
+            st.session_state.pkce_prod = None
+            st.session_state.pkce_sandbox = None
             
             st.query_params.clear()
             st.rerun()
     except Exception as e:
         st.error(f"❌ Authentication failed: {str(e)}")
+        st.info("🔄 Regenerating PKCE pairs... Please try logging in again.")
+        # Regenerate PKCE pairs on failure
+        from salesforce_client import generate_pkce_pair
+        verifier_prod, challenge_prod = generate_pkce_pair()
+        st.session_state.pkce_prod = {'verifier': verifier_prod, 'challenge': challenge_prod}
+        verifier_sandbox, challenge_sandbox = generate_pkce_pair()
+        st.session_state.pkce_sandbox = {'verifier': verifier_sandbox, 'challenge': challenge_sandbox}
         st.session_state.authenticated = False
 
 # Show login screen if not authenticated
@@ -212,24 +229,13 @@ if not st.session_state.authenticated:
         
         st.markdown("")  # Spacing
         
-        # Production login with PKCE
-        if st.session_state.code_verifier_prod is None:
-            code_verifier_prod, code_challenge_prod = generate_pkce_pair()
-            st.session_state.code_verifier_prod = code_verifier_prod
-        else:
-            code_verifier_prod = st.session_state.code_verifier_prod
-            # Regenerate code_challenge from stored verifier
-            import hashlib
-            import base64
-            code_challenge_bytes = hashlib.sha256(code_verifier_prod.encode('utf-8')).digest()
-            code_challenge_prod = base64.urlsafe_b64encode(code_challenge_bytes).decode('utf-8').rstrip('=')
-        
+        # Production login - use stored PKCE challenge
         prod_auth_url = get_authorization_url(
             client_id=CLIENT_ID,
             redirect_uri=REDIRECT_URI,
             is_sandbox=False,
-            code_challenge=code_challenge_prod,
-            state="production"  # State to identify production org
+            code_challenge=st.session_state.pkce_prod['challenge'],
+            state="production"
         )
         
         st.link_button(
@@ -240,24 +246,13 @@ if not st.session_state.authenticated:
         
         st.markdown("")  # Spacing
         
-        # Sandbox login with PKCE
-        if st.session_state.code_verifier_sandbox is None:
-            code_verifier_sandbox, code_challenge_sandbox = generate_pkce_pair()
-            st.session_state.code_verifier_sandbox = code_verifier_sandbox
-        else:
-            code_verifier_sandbox = st.session_state.code_verifier_sandbox
-            # Regenerate code_challenge from stored verifier
-            import hashlib
-            import base64
-            code_challenge_bytes = hashlib.sha256(code_verifier_sandbox.encode('utf-8')).digest()
-            code_challenge_sandbox = base64.urlsafe_b64encode(code_challenge_bytes).decode('utf-8').rstrip('=')
-        
+        # Sandbox login - use stored PKCE challenge
         sandbox_auth_url = get_authorization_url(
             client_id=CLIENT_ID,
-            redirect_uri=REDIRECT_URI,  # Keep redirect_uri consistent!
+            redirect_uri=REDIRECT_URI,
             is_sandbox=True,
-            code_challenge=code_challenge_sandbox,
-            state="sandbox"  # State to identify sandbox org
+            code_challenge=st.session_state.pkce_sandbox['challenge'],
+            state="sandbox"
         )
         
         st.link_button(
@@ -305,6 +300,14 @@ with st.sidebar:
         st.session_state.access_token = None
         st.session_state.instance_url = None
         st.session_state.refresh_token = None
+        
+        # Regenerate fresh PKCE pairs for next login
+        from salesforce_client import generate_pkce_pair
+        verifier_prod, challenge_prod = generate_pkce_pair()
+        st.session_state.pkce_prod = {'verifier': verifier_prod, 'challenge': challenge_prod}
+        verifier_sandbox, challenge_sandbox = generate_pkce_pair()
+        st.session_state.pkce_sandbox = {'verifier': verifier_sandbox, 'challenge': challenge_sandbox}
+        
         st.rerun()
     
     st.divider()
