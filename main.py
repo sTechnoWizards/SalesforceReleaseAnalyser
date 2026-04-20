@@ -744,10 +744,10 @@ with tab2:
     st.markdown("Analyze where specific fields are used across all components in your org")
     
     # Connection validation
-    can_analyze_fields = sf_username and sf_password and sf_token
+    can_analyze_fields = st.session_state.authenticated and st.session_state.access_token
     
     if not can_analyze_fields:
-        st.warning("⚠️ Please enter Salesforce credentials in the sidebar to analyze field usage")
+        st.warning("⚠️ Please login with Salesforce to analyze field usage")
     else:
         # Initialize session state for field analysis
         if 'field_analysis_results' not in st.session_state:
@@ -1042,10 +1042,10 @@ with tab3:
     st.header("🏥 Org Health Monitoring")
     
     # Connection validation
-    can_check_health = sf_username and sf_password and sf_token
+    can_check_health = st.session_state.authenticated and st.session_state.access_token
     
     if not can_check_health:
-        st.warning("⚠️ Please enter Salesforce credentials in the sidebar to view org health")
+        st.warning("⚠️ Please login with Salesforce to view org health")
     else:
         check_health_button = st.button(
             "🔍 Check Org Health",
