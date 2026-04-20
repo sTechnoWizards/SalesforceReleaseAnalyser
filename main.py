@@ -6,6 +6,7 @@ Run with: streamlit run main.py
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import PyPDF2
 import io
 import json
@@ -500,7 +501,250 @@ with st.sidebar:
         except Exception as e:
             st.error(f"❌ Error clearing cache: {e}")
 
+# ============================================================================
+# Helper Functions for Visual Diagrams
+# ============================================================================
+
+def generate_visual_html_diagram(impact):
+    """Generate beautiful HTML/CSS hierarchical diagram for delete impact analysis"""
+    target = impact['targetObject']
+    md_deps = impact.get('masterDetailChildren', [])
+    lk_deps = impact.get('lookupChildren', [])
+    
+    # Build dependency cards HTML
+    md_cards_html = ""
+    for dep in md_deps:
+        md_cards_html += f"""
+                <div class="dependency-card master-detail">
+                    <div class="card-object">🔗 {dep['childObject']}</div>
+                    <div class="card-field">{dep['childField']}</div>
+                    <div>
+                        <span class="card-badge badge-cascade">CASCADE DELETE</span>
+                    </div>
+                </div>
+            """
+    
+    lk_cards_html = ""
+    for dep in lk_deps:
+        restricted = dep.get('restrictedDelete', False)
+        restricted_badge = '<span class="card-badge badge-restricted">RESTRICTED DELETE</span>' if restricted else ''
+        lk_cards_html += f"""
+                <div class="dependency-card lookup">
+                    <div class="card-object">🔗 {dep['childObject']}</div>
+                    <div class="card-field">{dep['childField']}</div>
+                    <div>
+                        <span class="card-badge badge-orphaned">ORPHANED</span>
+                        {restricted_badge}
+                    </div>
+                </div>
+            """
+    
+    # Build complete HTML
+    html = f"""
+    <style>
+        .hierarchy-container {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            padding: 30px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+        }}
+        .target-object {{
+            background: white;
+            padding: 25px 35px;
+            border-radius: 12px;
+            text-align: center;
+            font-size: 24px;
+            font-weight: bold;
+            color: #1e3a8a;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.15);
+            margin-bottom: 40px;
+            border: 3px solid #3b82f6;
+        }}
+        .dependency-section {{
+            background: rgba(255,255,255,0.95);
+            padding: 25px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }}
+        .section-title {{
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 3px solid;
+        }}
+        .section-title.critical {{
+            color: #dc2626;
+            border-color: #dc2626;
+        }}
+        .section-title.warning {{
+            color: #ea580c;
+            border-color: #ea580c;
+        }}
+        .dependency-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }}
+        .dependency-card {{
+            padding: 18px;
+            border-radius: 10px;
+            border-left: 5px solid;
+            background: white;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }}
+        .dependency-card:hover {{
+            transform: translateY(-3px);
+            box-shadow: 0 6px 20px rgba(0,0,0,0.15);
+        }}
+        .dependency-card.master-detail {{
+            border-color: #dc2626;
+            background: linear-gradient(135deg, #fff 0%, #fee2e2 100%);
+        }}
+        .dependency-card.lookup {{
+            border-color: #ea580c;
+            background: linear-gradient(135deg, #fff 0%, #ffedd5 100%);
+        }}
+        .card-object {{
+            font-size: 16px;
+            font-weight: bold;
+            color: #1f2937;
+            margin-bottom: 8px;
+        }}
+        .card-field {{
+            font-size: 14px;
+            color: #6b7280;
+            font-family: 'Courier New', monospace;
+            background: rgba(0,0,0,0.05);
+            padding: 4px 8px;
+            border-radius: 4px;
+            display: inline-block;
+            margin-top: 5px;
+        }}
+        .card-badge {{
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: bold;
+            margin-top: 8px;
+            text-transform: uppercase;
+        }}
+        .badge-cascade {{
+            background: #dc2626;
+            color: white;
+        }}
+        .badge-orphaned {{
+            background: #ea580c;
+            color: white;
+        }}
+        .badge-restricted {{
+            background: #7c2d12;
+            color: white;
+        }}
+        .no-deps {{
+            text-align: center;
+            padding: 40px;
+            color: #059669;
+            font-size: 20px;
+            font-weight: bold;
+            background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);
+            border-radius: 12px;
+            border: 3px solid #059669;
+        }}
+    </style>
+    
+    <div class="hierarchy-container">
+        <div class="target-object">
+            📦 {target}
+            <div style="font-size: 14px; color: #6b7280; margin-top: 8px; font-weight: normal;">
+                Target Object for Delete Impact Analysis
+            </div>
+        </div>
+    """
+    
+    if md_deps:
+        html += f"""
+        <div class="dependency-section">
+            <div class="section-title critical">
+                🔴 Master-Detail Dependencies (CASCADE DELETE)
+                <div style="font-size: 13px; font-weight: normal; color: #991b1b; margin-top: 5px;">
+                    ⚠️ These child records will be PERMANENTLY DELETED when parent is deleted
+                </div>
+            </div>
+            <div class="dependency-grid">
+                {md_cards_html}
+            </div>
+        </div>
+        """
+    
+    if lk_deps:
+        html += f"""
+        <div class="dependency-section">
+            <div class="section-title warning">
+                🟡 Lookup Dependencies (ORPHANED RECORDS)
+                <div style="font-size: 13px; font-weight: normal; color: #9a3412; margin-top: 5px;">
+                    ⚠️ These child records will remain but their lookup field will become NULL (broken reference)
+                </div>
+            </div>
+            <div class="dependency-grid">
+                {lk_cards_html}
+            </div>
+        </div>
+        """
+    
+    if not md_deps and not lk_deps:
+        html += """
+        <div class="no-deps">
+            ✅ SAFE TO DELETE
+            <div style="font-size: 14px; margin-top: 10px; font-weight: normal;">
+                No child dependencies found. Deleting this object won't cascade to any other objects.
+            </div>
+        </div>
+        """
+    
+    html += """
+    </div>
+    """
+    
+    return html
+
+
+def generate_text_tree_diagram(impact):
+    """Generate ASCII tree diagram for copy-paste"""
+    target = impact['targetObject']
+    md_deps = impact.get('masterDetailChildren', [])
+    lk_deps = impact.get('lookupChildren', [])
+    
+    tree = f"📦 {target} (Target Object)\n"
+    tree += "│\n"
+    
+    if md_deps:
+        tree += "├── 🔴 Master-Detail Dependencies (CASCADE DELETE)\n"
+        for i, dep in enumerate(md_deps):
+            prefix = "│   ├── " if i < len(md_deps) - 1 else "│   └── "
+            tree += f"{prefix}{dep['childObject']}.{dep['childField']}\n"
+        tree += "│\n"
+    
+    if lk_deps:
+        tree += "└── 🟡 Lookup Dependencies (ORPHANED)\n"
+        for i, dep in enumerate(lk_deps):
+            prefix = "    ├── " if i < len(lk_deps) - 1 else "    └── "
+            restricted = " [RESTRICTED DELETE]" if dep.get('restrictedDelete', False) else ""
+            tree += f"{prefix}{dep['childObject']}.{dep['childField']}{restricted}\n"
+    
+    if not md_deps and not lk_deps:
+        tree += "└── ✅ No dependencies (SAFE TO DELETE)\n"
+    
+    return tree
+
+# ============================================================================
 # Main content
+# ============================================================================
 tab1, tab2, tab3, tab4 = st.tabs(["📊 Release Analysis", "🔍 Field Usage", "🏥 Org Health", "ℹ️ About"])
 
 with tab1:
