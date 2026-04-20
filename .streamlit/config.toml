@@ -1,2 +1,8 @@
 [client]
+# "minimal" hides the toolbar almost entirely, showing only options set externally.
+# "viewer" hides developer options like the "Deploy" button.
 toolbarMode = "minimal"
+
+[ui]
+# Hides the entire top bar, including the running animation and stop button.
+hideTopBar = true
