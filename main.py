@@ -375,11 +375,25 @@ if not st.session_state.authenticated:
             state=f"{session_id}_prod:production"
         )
         
-        st.link_button(
-            "🌐 Login with Production / Developer Org",
-            prod_auth_url,
-            use_container_width=True
-        )
+        # Create button that opens in same window
+        st.markdown(f"""
+        <a href="{prod_auth_url}" style="
+            display: inline-block;
+            width: 100%;
+            padding: 0.75rem 1rem;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            text-align: center;
+            text-decoration: none;
+            border-radius: 0.5rem;
+            font-weight: 600;
+            font-size: 1rem;
+            transition: transform 0.2s;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        " onmouseover="this.style.transform='scale(1.02)'" onmouseout="this.style.transform='scale(1)'">
+            🌐 Login with Production / Developer Org
+        </a>
+        """, unsafe_allow_html=True)
         
         st.markdown("")  # Spacing
         
@@ -395,11 +409,25 @@ if not st.session_state.authenticated:
             state=f"{session_id}_sandbox:sandbox"
         )
         
-        st.link_button(
-            "🧪 Login with Sandbox Org",
-            sandbox_auth_url,
-            use_container_width=True
-        )
+        # Create button that opens in same window
+        st.markdown(f"""
+        <a href="{sandbox_auth_url}" style="
+            display: inline-block;
+            width: 100%;
+            padding: 0.75rem 1rem;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            text-align: center;
+            text-decoration: none;
+            border-radius: 0.5rem;
+            font-weight: 600;
+            font-size: 1rem;
+            transition: transform 0.2s;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        " onmouseover="this.style.transform='scale(1.02)'" onmouseout="this.style.transform='scale(1)'">
+            🧪 Login with Sandbox Org
+        </a>
+        """, unsafe_allow_html=True)
         
         st.markdown("---")
         st.info("""
