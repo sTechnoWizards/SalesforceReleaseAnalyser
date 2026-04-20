@@ -764,95 +764,95 @@ with tab2:
                 st.session_state.object_fields_map = {}
             
             st.divider()
-        
-        col1, col2 = st.columns([1, 1])
-        
-        with col1:
-            st.subheader("1️⃣ Select Objects & Fields")
             
-            # Fetch objects button
-            if st.button("📦 Load Objects from Org", use_container_width=True):
-                with st.spinner("Fetching objects..."):
-                    try:
-                        sf_client = SalesforceOrgScanner(
-                            instance_url=st.session_state.instance_url,
-                            access_token=st.session_state.access_token
-                        )
-                        objects = sf_client.get_all_objects()
-                        st.session_state.available_objects = objects
-                        st.success(f"✅ Loaded {len(objects)} objects")
-                    except Exception as e:
-                        st.error(f"❌ Error: {str(e)}")
+            col1, col2 = st.columns([1, 1])
             
-            # Object selection UI
-            if 'available_objects' in st.session_state:
-                st.markdown("### Add Object & Fields")
+            with col1:
+                st.subheader("1️⃣ Select Objects & Fields")
                 
-                # Object selector
-                object_options = {obj['label']: obj['name'] for obj in st.session_state.available_objects}
-                selected_object_label = st.selectbox(
-                    "Select Object",
-                    options=list(object_options.keys()),
-                    key="object_selector"
-                )
+                # Fetch objects button
+                if st.button("📦 Load Objects from Org", use_container_width=True):
+                    with st.spinner("Fetching objects..."):
+                        try:
+                            sf_client = SalesforceOrgScanner(
+                                instance_url=st.session_state.instance_url,
+                                access_token=st.session_state.access_token
+                            )
+                            objects = sf_client.get_all_objects()
+                            st.session_state.available_objects = objects
+                            st.success(f"✅ Loaded {len(objects)} objects")
+                        except Exception as e:
+                            st.error(f"❌ Error: {str(e)}")
                 
-                if selected_object_label:
-                    selected_object = object_options[selected_object_label]
+                # Object selection UI
+                if 'available_objects' in st.session_state:
+                    st.markdown("### Add Object & Fields")
                     
-                    # Field input
-                    field_input = st.text_input(
-                        "Comma-separated Field API Names",
-                        placeholder="Name, Industry, Type",
-                        help="Enter field API names separated by commas",
-                        key="field_input"
+                    # Object selector
+                    object_options = {obj['label']: obj['name'] for obj in st.session_state.available_objects}
+                    selected_object_label = st.selectbox(
+                        "Select Object",
+                        options=list(object_options.keys()),
+                        key="object_selector"
                     )
                     
-                    # Add button
-                    if st.button("➕ Add Object & Fields", use_container_width=True):
-                        if field_input:
-                            # Parse fields
-                            fields = [f.strip() for f in field_input.split(',') if f.strip()]
-                            
-                            # Add to map
-                            if selected_object in st.session_state.object_fields_map:
-                                st.session_state.object_fields_map[selected_object].extend(fields)
-                                # Remove duplicates
-                                st.session_state.object_fields_map[selected_object] = list(set(st.session_state.object_fields_map[selected_object]))
+                    if selected_object_label:
+                        selected_object = object_options[selected_object_label]
+                        
+                        # Field input
+                        field_input = st.text_input(
+                            "Comma-separated Field API Names",
+                            placeholder="Name, Industry, Type",
+                            help="Enter field API names separated by commas",
+                            key="field_input"
+                        )
+                        
+                        # Add button
+                        if st.button("➕ Add Object & Fields", use_container_width=True):
+                            if field_input:
+                                # Parse fields
+                                fields = [f.strip() for f in field_input.split(',') if f.strip()]
+                                
+                                # Add to map
+                                if selected_object in st.session_state.object_fields_map:
+                                    st.session_state.object_fields_map[selected_object].extend(fields)
+                                    # Remove duplicates
+                                    st.session_state.object_fields_map[selected_object] = list(set(st.session_state.object_fields_map[selected_object]))
+                                else:
+                                    st.session_state.object_fields_map[selected_object] = fields
+                                
+                                st.success(f"✅ Added {len(fields)} fields for {selected_object}")
+                                st.rerun()
                             else:
-                                st.session_state.object_fields_map[selected_object] = fields
-                            
-                            st.success(f"✅ Added {len(fields)} fields for {selected_object}")
+                                st.warning("⚠️ Please enter at least one field")
+                    
+                    # Display selected objects and fields
+                    if st.session_state.object_fields_map:
+                        st.markdown("### Selected for Analysis")
+                        
+                        for obj_name, fields in st.session_state.object_fields_map.items():
+                            with st.expander(f"📦 {obj_name} ({len(fields)} fields)"):
+                                for field in fields:
+                                    col_a, col_b = st.columns([4, 1])
+                                    with col_a:
+                                        st.text(f"• {field}")
+                                    with col_b:
+                                        if st.button("❌", key=f"remove_{obj_name}_{field}"):
+                                            st.session_state.object_fields_map[obj_name].remove(field)
+                                            if not st.session_state.object_fields_map[obj_name]:
+                                                del st.session_state.object_fields_map[obj_name]
+                                            st.rerun()
+                        
+                        if st.button("🗑️ Clear All", use_container_width=True):
+                            st.session_state.object_fields_map = {}
                             st.rerun()
-                        else:
-                            st.warning("⚠️ Please enter at least one field")
-                
-                # Display selected objects and fields
-                if st.session_state.object_fields_map:
-                    st.markdown("### Selected for Analysis")
-                    
-                    for obj_name, fields in st.session_state.object_fields_map.items():
-                        with st.expander(f"📦 {obj_name} ({len(fields)} fields)"):
-                            for field in fields:
-                                col_a, col_b = st.columns([4, 1])
-                                with col_a:
-                                    st.text(f"• {field}")
-                                with col_b:
-                                    if st.button("❌", key=f"remove_{obj_name}_{field}"):
-                                        st.session_state.object_fields_map[obj_name].remove(field)
-                                        if not st.session_state.object_fields_map[obj_name]:
-                                            del st.session_state.object_fields_map[obj_name]
-                                        st.rerun()
-                    
-                    if st.button("🗑️ Clear All", use_container_width=True):
-                        st.session_state.object_fields_map = {}
-                        st.rerun()
-        
-        with col2:
-            st.subheader("2️⃣ Run Analysis")
             
-            if not st.session_state.object_fields_map:
-                st.info("👈 Add objects and fields to analyze")
-            else:
+            with col2:
+                st.subheader("2️⃣ Run Analysis")
+                
+                if not st.session_state.object_fields_map:
+                    st.info("👈 Add objects and fields to analyze")
+                else:
                 total_fields = sum(len(fields) for fields in st.session_state.object_fields_map.values())
                 st.metric("Fields to Analyze", total_fields)
                 
@@ -930,119 +930,119 @@ with tab2:
                     except Exception as e:
                         st.error(f"❌ Error during analysis: {str(e)}")
                         st.exception(e)
-        
-        # Display results
-        if st.session_state.field_analysis_results:
-            st.divider()
-            st.header("📊 Analysis Results")
             
-            # Summary metrics
-            summary = st.session_state.field_analysis_summary
-            
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Total Usages", summary.get('total_usages', 0))
-            with col2:
-                st.metric("Active Usages", summary.get('active_usages', 0))
-            with col3:
-                st.metric("Commented Out", summary.get('commented_usages', 0))
-            with col4:
-                st.metric("Components", summary.get('unique_components', 0))
-            
-            # Breakdown by component type
-            st.subheader("📂 Usage by Component Type")
-            by_component = summary.get('by_component_type', {})
-            if by_component:
-                df_component = pd.DataFrame(list(by_component.items()), columns=['Component Type', 'Count'])
-                st.bar_chart(df_component.set_index('Component Type'))
-            
-            # Detailed results table
-            st.subheader("📋 Detailed Results")
-            
-            # Check if any fields had non-filterable issues
-            non_filterable_note = False
+            # Display results
             if st.session_state.field_analysis_results:
-                for result in st.session_state.field_analysis_results:
-                    if result.get('population_percentage', 0) == 0 and result.get('total_records', 0) > 0:
-                        non_filterable_note = True
-                        break
-            
-            if non_filterable_note:
-                st.info("ℹ️ Some fields show 0% population because they are non-filterable (e.g., Long Text Area, Encrypted fields). Usage analysis is still performed for these fields.")
-            
-            results_df = pd.DataFrame(st.session_state.field_analysis_results)
-            
-            # Filters
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                filter_object = st.multiselect(
-                    "Filter by Object",
-                    options=results_df['object'].unique(),
-                    default=results_df['object'].unique()
+                st.divider()
+                st.header("📊 Analysis Results")
+                
+                # Summary metrics
+                summary = st.session_state.field_analysis_summary
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total Usages", summary.get('total_usages', 0))
+                with col2:
+                    st.metric("Active Usages", summary.get('active_usages', 0))
+                with col3:
+                    st.metric("Commented Out", summary.get('commented_usages', 0))
+                with col4:
+                    st.metric("Components", summary.get('unique_components', 0))
+                
+                # Breakdown by component type
+                st.subheader("📂 Usage by Component Type")
+                by_component = summary.get('by_component_type', {})
+                if by_component:
+                    df_component = pd.DataFrame(list(by_component.items()), columns=['Component Type', 'Count'])
+                    st.bar_chart(df_component.set_index('Component Type'))
+                
+                # Detailed results table
+                st.subheader("📋 Detailed Results")
+                
+                # Check if any fields had non-filterable issues
+                non_filterable_note = False
+                if st.session_state.field_analysis_results:
+                    for result in st.session_state.field_analysis_results:
+                        if result.get('population_percentage', 0) == 0 and result.get('total_records', 0) > 0:
+                            non_filterable_note = True
+                            break
+                
+                if non_filterable_note:
+                    st.info("ℹ️ Some fields show 0% population because they are non-filterable (e.g., Long Text Area, Encrypted fields). Usage analysis is still performed for these fields.")
+                
+                results_df = pd.DataFrame(st.session_state.field_analysis_results)
+                
+                # Filters
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    filter_object = st.multiselect(
+                        "Filter by Object",
+                        options=results_df['object'].unique(),
+                        default=results_df['object'].unique()
+                    )
+                with col2:
+                    filter_component = st.multiselect(
+                        "Filter by Component Type",
+                        options=results_df['component_type'].unique(),
+                        default=results_df['component_type'].unique()
+                    )
+                with col3:
+                    show_commented = st.checkbox("Include Commented Code", value=True)
+                
+                # Apply filters
+                filtered_df = results_df[
+                    (results_df['object'].isin(filter_object)) &
+                    (results_df['component_type'].isin(filter_component))
+                ]
+                
+                if not show_commented:
+                    filtered_df = filtered_df[filtered_df['is_commented'] == False]
+                
+                # Display table
+                st.dataframe(
+                    filtered_df[[
+                        'object', 'field', 'component_type', 'component_name', 
+                        'file_type', 'line_number', 'method_name', 'code_snippet',
+                        'is_active', 'population_percentage'
+                    ]],
+                    use_container_width=True,
+                    height=400
                 )
-            with col2:
-                filter_component = st.multiselect(
-                    "Filter by Component Type",
-                    options=results_df['component_type'].unique(),
-                    default=results_df['component_type'].unique()
-                )
-            with col3:
-                show_commented = st.checkbox("Include Commented Code", value=True)
-            
-            # Apply filters
-            filtered_df = results_df[
-                (results_df['object'].isin(filter_object)) &
-                (results_df['component_type'].isin(filter_component))
-            ]
-            
-            if not show_commented:
-                filtered_df = filtered_df[filtered_df['is_commented'] == False]
-            
-            # Display table
-            st.dataframe(
-                filtered_df[[
-                    'object', 'field', 'component_type', 'component_name', 
-                    'file_type', 'line_number', 'method_name', 'code_snippet',
-                    'is_active', 'population_percentage'
-                ]],
-                use_container_width=True,
-                height=400
-            )
-            
-            # Export options
-            st.divider()
-            st.subheader("📥 Export Results")
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                # CSV export
-                csv = filtered_df.to_csv(index=False)
-                st.download_button(
-                    label="📄 Download as CSV",
-                    data=csv,
-                    file_name="field_usage_analysis.csv",
-                    mime="text/csv",
-                    use_container_width=True
-                )
-            
-            with col2:
-                # Excel export (if openpyxl available)
-                try:
-                    import io
-                    buffer = io.BytesIO()
-                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                        filtered_df.to_excel(writer, sheet_name='Field Usage', index=False)
-                    
+                
+                # Export options
+                st.divider()
+                st.subheader("📥 Export Results")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # CSV export
+                    csv = filtered_df.to_csv(index=False)
                     st.download_button(
-                        label="📊 Download as Excel",
-                        data=buffer.getvalue(),
-                        file_name="field_usage_analysis.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        label="📄 Download as CSV",
+                        data=csv,
+                        file_name="field_usage_analysis.csv",
+                        mime="text/csv",
                         use_container_width=True
                     )
-                except ImportError:
-                    st.info("💡 Install openpyxl for Excel export: pip install openpyxl")
+                
+                with col2:
+                    # Excel export (if openpyxl available)
+                    try:
+                        import io
+                        buffer = io.BytesIO()
+                        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                            filtered_df.to_excel(writer, sheet_name='Field Usage', index=False)
+                        
+                        st.download_button(
+                            label="📊 Download as Excel",
+                            data=buffer.getvalue(),
+                            file_name="field_usage_analysis.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
+                    except ImportError:
+                        st.info("💡 Install openpyxl for Excel export: pip install openpyxl")
         
         # Delete Impact Analysis Tab
         with subtab2:
