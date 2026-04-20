@@ -21,4 +21,3 @@ python-dotenv==1.0.1
 # Data processing for tables
 pandas>=2.2.2
 numpy>=2.0.0
-
