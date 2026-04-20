@@ -1,0 +1,22 @@
+# Salesforce Release Impact Analyzer - Dependencies
+
+# Salesforce API client
+simple-salesforce==1.12.6
+
+# Google Gemini AI
+google-generativeai==0.8.3
+
+# Web UI framework
+streamlit>=1.40.0
+
+# PDF processing
+PyPDF2==3.0.1
+
+# Excel export (future feature)
+openpyxl==3.1.2
+
+# JSON parsing
+python-dotenv==1.0.1
+
+# Data processing for tables
+pandas==2.0.3
