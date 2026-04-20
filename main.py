@@ -11,6 +11,7 @@ import io
 import json
 import os
 import pandas as pd
+import secrets as secrets_module
 from dotenv import load_dotenv
 from salesforce_client import (
     SalesforceOrgScanner,
@@ -26,6 +27,78 @@ from field_analyzer import FieldUsageAnalyzer
 
 # Load environment variables
 load_dotenv()
+
+# ============================================================================
+# PKCE Storage Helpers (file-based for persistence across OAuth redirects)
+# ============================================================================
+
+PKCE_STORAGE_FILE = '.pkce_storage.json'
+
+def save_pkce_verifier(session_id, verifier):
+    """Save PKCE verifier to file storage keyed by session ID."""
+    try:
+        # Load existing storage
+        if os.path.exists(PKCE_STORAGE_FILE):
+            with open(PKCE_STORAGE_FILE, 'r') as f:
+                storage = json.load(f)
+        else:
+            storage = {}
+        
+        # Save verifier with timestamp for cleanup
+        import time
+        storage[session_id] = {
+            'verifier': verifier,
+            'timestamp': time.time()
+        }
+        
+        # Write back to file
+        with open(PKCE_STORAGE_FILE, 'w') as f:
+            json.dump(storage, f)
+        
+    except Exception as e:
+        st.error(f"Failed to save PKCE verifier: {e}")
+
+def load_pkce_verifier(session_id):
+    """Load PKCE verifier from file storage by session ID."""
+    try:
+        if not os.path.exists(PKCE_STORAGE_FILE):
+            return None
+        
+        with open(PKCE_STORAGE_FILE, 'r') as f:
+            storage = json.load(f)
+        
+        if session_id in storage:
+            return storage[session_id]['verifier']
+        return None
+        
+    except Exception as e:
+        st.error(f"Failed to load PKCE verifier: {e}")
+        return None
+
+def cleanup_old_pkce_verifiers():
+    """Remove PKCE verifiers older than 10 minutes."""
+    try:
+        if not os.path.exists(PKCE_STORAGE_FILE):
+            return
+        
+        with open(PKCE_STORAGE_FILE, 'r') as f:
+            storage = json.load(f)
+        
+        import time
+        current_time = time.time()
+        # Keep only verifiers less than 10 minutes old
+        storage = {k: v for k, v in storage.items() 
+                  if current_time - v.get('timestamp', 0) < 600}
+        
+        with open(PKCE_STORAGE_FILE, 'w') as f:
+            json.dump(storage, f)
+            
+    except Exception as e:
+        pass  # Silently fail for cleanup
+
+# ============================================================================
+# OAuth Configuration
+# ============================================================================
 
 # OAuth Configuration (from environment variables or Streamlit secrets)
 # Safely check for secrets without throwing error if file doesn't exist
@@ -47,6 +120,9 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Cleanup old PKCE verifiers on page load
+cleanup_old_pkce_verifiers()
+
 # Initialize session state for OAuth
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
@@ -56,17 +132,9 @@ if 'instance_url' not in st.session_state:
     st.session_state.instance_url = None
 if 'refresh_token' not in st.session_state:
     st.session_state.refresh_token = None
-
-# Generate PKCE pairs once per session and store both verifier and challenge
-if 'pkce_prod' not in st.session_state or st.session_state.pkce_prod is None:
-    from salesforce_client import generate_pkce_pair
-    verifier, challenge = generate_pkce_pair()
-    st.session_state.pkce_prod = {'verifier': verifier, 'challenge': challenge}
-
-if 'pkce_sandbox' not in st.session_state or st.session_state.pkce_sandbox is None:
-    from salesforce_client import generate_pkce_pair
-    verifier, challenge = generate_pkce_pair()
-    st.session_state.pkce_sandbox = {'verifier': verifier, 'challenge': challenge}
+if 'oauth_session_id' not in st.session_state:
+    # Generate unique session ID for this user's OAuth flow
+    st.session_state.oauth_session_id = secrets_module.token_urlsafe(16)
 
 # Custom CSS
 st.markdown("""
@@ -154,15 +222,24 @@ query_params = st.query_params
 if 'code' in query_params and not st.session_state.authenticated:
     try:
         code = query_params['code']
-        # Check state parameter to determine if sandbox
+        # State parameter format: "sessionID:org_type" where org_type is "production" or "sandbox"
         state = query_params.get('state', '')
-        is_sandbox = (state == 'sandbox')
         
-        # Get the appropriate code_verifier from session state
-        if is_sandbox:
-            code_verifier = st.session_state.pkce_sandbox['verifier']
+        if ':' in state:
+            session_id, org_type = state.split(':', 1)
+            is_sandbox = (org_type == 'sandbox')
         else:
-            code_verifier = st.session_state.pkce_prod['verifier']
+            # Fallback for old format
+            is_sandbox = (state == 'sandbox')
+            session_id = st.session_state.oauth_session_id
+        
+        # Load PKCE verifier from file storage
+        code_verifier = load_pkce_verifier(session_id)
+        
+        if not code_verifier:
+            st.error("❌ OAuth session expired or invalid. Please log in again.")
+            st.query_params.clear()
+            st.rerun()
         
         with st.spinner("🔐 Authenticating with Salesforce..."):
             token_response = exchange_code_for_token(
@@ -179,17 +256,12 @@ if 'code' in query_params and not st.session_state.authenticated:
             st.session_state.refresh_token = token_response.get('refresh_token')
             st.session_state.authenticated = True
             
-            # Clear PKCE pairs after successful auth
-            st.session_state.pkce_prod = None
-            st.session_state.pkce_sandbox = None
-            
             st.query_params.clear()
             st.rerun()
     except Exception as e:
         st.error(f"❌ Authentication failed: {str(e)}")
-        st.info("🔄 Regenerating PKCE pairs... Please try logging in again.")
-        # Regenerate PKCE pairs on failure
-        from salesforce_client import generate_pkce_pair
+        st.info("🔄 Please try logging in again.")
+
         verifier_prod, challenge_prod = generate_pkce_pair()
         st.session_state.pkce_prod = {'verifier': verifier_prod, 'challenge': challenge_prod}
         verifier_sandbox, challenge_sandbox = generate_pkce_pair()
@@ -229,13 +301,17 @@ if not st.session_state.authenticated:
         
         st.markdown("")  # Spacing
         
-        # Production login - use stored PKCE challenge
+        # Production login - generate fresh PKCE pair and save verifier
+        prod_verifier, prod_challenge = generate_pkce_pair()
+        session_id = st.session_state.oauth_session_id
+        save_pkce_verifier(f"{session_id}_prod", prod_verifier)
+        
         prod_auth_url = get_authorization_url(
             client_id=CLIENT_ID,
             redirect_uri=REDIRECT_URI,
             is_sandbox=False,
-            code_challenge=st.session_state.pkce_prod['challenge'],
-            state="production"
+            code_challenge=prod_challenge,
+            state=f"{session_id}_prod:production"
         )
         
         st.link_button(
@@ -246,13 +322,16 @@ if not st.session_state.authenticated:
         
         st.markdown("")  # Spacing
         
-        # Sandbox login - use stored PKCE challenge
+        # Sandbox login - generate fresh PKCE pair and save verifier
+        sandbox_verifier, sandbox_challenge = generate_pkce_pair()
+        save_pkce_verifier(f"{session_id}_sandbox", sandbox_verifier)
+        
         sandbox_auth_url = get_authorization_url(
             client_id=CLIENT_ID,
             redirect_uri=REDIRECT_URI,
             is_sandbox=True,
-            code_challenge=st.session_state.pkce_sandbox['challenge'],
-            state="sandbox"
+            code_challenge=sandbox_challenge,
+            state=f"{session_id}_sandbox:sandbox"
         )
         
         st.link_button(
@@ -301,12 +380,8 @@ with st.sidebar:
         st.session_state.instance_url = None
         st.session_state.refresh_token = None
         
-        # Regenerate fresh PKCE pairs for next login
-        from salesforce_client import generate_pkce_pair
-        verifier_prod, challenge_prod = generate_pkce_pair()
-        st.session_state.pkce_prod = {'verifier': verifier_prod, 'challenge': challenge_prod}
-        verifier_sandbox, challenge_sandbox = generate_pkce_pair()
-        st.session_state.pkce_sandbox = {'verifier': verifier_sandbox, 'challenge': challenge_sandbox}
+        # Generate new session ID for next login
+        st.session_state.oauth_session_id = secrets_module.token_urlsafe(16)
         
         st.rerun()
     
