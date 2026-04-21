@@ -95,22 +95,30 @@ You need Salesforce admin privileges to create a Connected App.
    - `All users may self-authorize` (for wider access)
 5. Click **Save**
 
-### ⚡ Important: One Connected App = All Orgs
+### ⚡ Important: Where to Create the Connected App
 
-**You only need to create ONE Connected App!**
+**⚠️ CRITICAL: Create Connected App in PRODUCTION Org (not Sandbox)**
 
-- Create it in any Salesforce org (production, sandbox, or developer org)
-- Users from **any Salesforce org** can authenticate using the same Client ID/Secret
-- When they login, they use their own org's credentials
-- The app receives access to **their** org, not the org where you created the Connected App
+Salesforce blocks cross-org OAuth by default. Here's what works:
 
-**Example:**
-- You create Connected App in your Sandbox org → Get Client ID/Secret
-- User A logs in with Production org → App accesses User A's production data
-- User B logs in with Sandbox org → App accesses User B's sandbox data
-- User C logs in with their company's org → App accesses User C's org data
+✅ **What WORKS:**
+- Create Connected App in **PRODUCTION** org
+- Users can login to Production org ✅
+- Users can login to ANY Sandbox of the same org ✅
 
-**No need to create multiple Connected Apps unless you want separate apps for different purposes (e.g., internal vs external users).**
+❌ **What DOESN'T WORK:**
+- Create Connected App in Sandbox org → Users try to login to Production = **BLOCKED**
+- Create Connected App in your org → Users from different companies try to login = **BLOCKED**
+
+**Recommendation:**
+1. Create the Connected App in your **Production** org (or Developer org if no production)
+2. Use that ONE Connected App for both production and sandbox logins
+3. If analyzing multiple companies' orgs, each company needs their own Connected App
+
+**For Multi-Company Deployments:**
+If you're deploying for multiple Salesforce customers, you have two options:
+1. **Each customer creates their own Connected App** in their org (provides their own Client ID/Secret)
+2. **Become a Salesforce ISV Partner** to create globally-trusted apps (advanced, requires partnership)
 
 ---
 
@@ -287,6 +295,14 @@ streamlit run main.py
 ## Troubleshooting
 
 ### OAuth Issues
+
+**Problem**: "OAUTH_AUTHORIZATION_BLOCKED - Cross-org OAuth flows are not supported"
+
+**Solution**:
+- **Root Cause**: Your Connected App was created in a different org than the one you're trying to login to
+- **Fix**: Create the Connected App in your **PRODUCTION** org (not Sandbox)
+- **Why**: Salesforce blocks OAuth across different orgs by default
+- **Result**: Production Connected App works for both production AND sandbox logins of the same org
 
 **Problem**: "redirect_uri_mismatch" error
 
