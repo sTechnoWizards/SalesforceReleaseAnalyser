@@ -95,6 +95,23 @@ You need Salesforce admin privileges to create a Connected App.
    - `All users may self-authorize` (for wider access)
 5. Click **Save**
 
+### ⚡ Important: One Connected App = All Orgs
+
+**You only need to create ONE Connected App!**
+
+- Create it in any Salesforce org (production, sandbox, or developer org)
+- Users from **any Salesforce org** can authenticate using the same Client ID/Secret
+- When they login, they use their own org's credentials
+- The app receives access to **their** org, not the org where you created the Connected App
+
+**Example:**
+- You create Connected App in your Sandbox org → Get Client ID/Secret
+- User A logs in with Production org → App accesses User A's production data
+- User B logs in with Sandbox org → App accesses User B's sandbox data
+- User C logs in with their company's org → App accesses User C's org data
+
+**No need to create multiple Connected Apps unless you want separate apps for different purposes (e.g., internal vs external users).**
+
 ---
 
 ## Deployment Options
@@ -143,6 +160,12 @@ SF_REDIRECT_URI = "https://your-app-name.streamlit.app/"
 GEMINI_API_KEY = "YOUR_GEMINI_KEY_HERE"  # Optional
 OPENAI_API_KEY = "YOUR_OPENAI_KEY_HERE"  # Optional
 ```
+
+**💡 Advanced: Multiple Connected Apps**
+
+You CAN store multiple sets of credentials in Streamlit secrets, but the current app only uses one set (`SF_CLIENT_ID`, `SF_CLIENT_SECRET`). 
+
+To use multiple Connected Apps (e.g., one for internal users, one for external), you would need to modify the code to let users select which credentials to use. Most users only need ONE set of credentials since one Connected App works for all Salesforce orgs.
 
 3. Click **"Save"**
 4. App will automatically redeploy
