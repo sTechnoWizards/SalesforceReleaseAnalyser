@@ -95,6 +95,31 @@ You need Salesforce admin privileges to create a Connected App.
    - `All users may self-authorize` (for wider access)
 5. Click **Save**
 
+### ⚡ Important: Where to Create the Connected App
+
+**⚠️ CRITICAL: Create Connected App in PRODUCTION Org (not Sandbox)**
+
+Salesforce blocks cross-org OAuth by default. Here's what works:
+
+✅ **What WORKS:**
+- Create Connected App in **PRODUCTION** org
+- Users can login to Production org ✅
+- Users can login to ANY Sandbox of the same org ✅
+
+❌ **What DOESN'T WORK:**
+- Create Connected App in Sandbox org → Users try to login to Production = **BLOCKED**
+- Create Connected App in your org → Users from different companies try to login = **BLOCKED**
+
+**Recommendation:**
+1. Create the Connected App in your **Production** org (or Developer org if no production)
+2. Use that ONE Connected App for both production and sandbox logins
+3. If analyzing multiple companies' orgs, each company needs their own Connected App
+
+**For Multi-Company Deployments:**
+If you're deploying for multiple Salesforce customers, you have two options:
+1. **Each customer creates their own Connected App** in their org (provides their own Client ID/Secret)
+2. **Become a Salesforce ISV Partner** to create globally-trusted apps (advanced, requires partnership)
+
 ---
 
 ## Deployment Options
@@ -143,6 +168,12 @@ SF_REDIRECT_URI = "https://your-app-name.streamlit.app/"
 GEMINI_API_KEY = "YOUR_GEMINI_KEY_HERE"  # Optional
 OPENAI_API_KEY = "YOUR_OPENAI_KEY_HERE"  # Optional
 ```
+
+**💡 Advanced: Multiple Connected Apps**
+
+You CAN store multiple sets of credentials in Streamlit secrets, but the current app only uses one set (`SF_CLIENT_ID`, `SF_CLIENT_SECRET`). 
+
+To use multiple Connected Apps (e.g., one for internal users, one for external), you would need to modify the code to let users select which credentials to use. Most users only need ONE set of credentials since one Connected App works for all Salesforce orgs.
 
 3. Click **"Save"**
 4. App will automatically redeploy
