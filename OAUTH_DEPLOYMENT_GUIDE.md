@@ -296,14 +296,6 @@ streamlit run main.py
 
 ### OAuth Issues
 
-**Problem**: "OAUTH_AUTHORIZATION_BLOCKED - Cross-org OAuth flows are not supported"
-
-**Solution**:
-- **Root Cause**: Your Connected App was created in a different org than the one you're trying to login to
-- **Fix**: Create the Connected App in your **PRODUCTION** org (not Sandbox)
-- **Why**: Salesforce blocks OAuth across different orgs by default
-- **Result**: Production Connected App works for both production AND sandbox logins of the same org
-
 **Problem**: "redirect_uri_mismatch" error
 
 **Solution**: 

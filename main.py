@@ -35,8 +35,8 @@ load_dotenv()
 
 PKCE_STORAGE_FILE = '.pkce_storage.json'
 
-def save_pkce_verifier(session_id, verifier):
-    """Save PKCE verifier to file storage keyed by session ID."""
+def save_pkce_verifier(session_id, verifier, org_name=None):
+    """Save PKCE verifier and selected org to file storage keyed by session ID."""
     try:
         # Load existing storage
         if os.path.exists(PKCE_STORAGE_FILE):
@@ -49,7 +49,8 @@ def save_pkce_verifier(session_id, verifier):
         import time
         storage[session_id] = {
             'verifier': verifier,
-            'timestamp': time.time()
+            'timestamp': time.time(),
+            'org_name': org_name  # Store selected org name
         }
         
         # Write back to file
@@ -60,21 +61,21 @@ def save_pkce_verifier(session_id, verifier):
         st.error(f"Failed to save PKCE verifier: {e}")
 
 def load_pkce_verifier(session_id):
-    """Load PKCE verifier from file storage by session ID."""
+    """Load PKCE verifier and org name from file storage by session ID."""
     try:
         if not os.path.exists(PKCE_STORAGE_FILE):
-            return None
+            return None, None
         
         with open(PKCE_STORAGE_FILE, 'r') as f:
             storage = json.load(f)
         
-        if session_id in storage:
-            return storage[session_id]['verifier']
-        return None
-        
+        data = storage.get(session_id)
+        if data:
+            return data.get('verifier'), data.get('org_name')
+        return None, None
+    
     except Exception as e:
-        st.error(f"Failed to load PKCE verifier: {e}")
-        return None
+        return None, None
 
 def cleanup_old_pkce_verifiers():
     """Remove PKCE verifiers older than 10 minutes."""
@@ -98,21 +99,80 @@ def cleanup_old_pkce_verifiers():
         pass  # Silently fail for cleanup
 
 # ============================================================================
-# OAuth Configuration
+# OAuth Configuration - Multi-Org Support
 # ============================================================================
 
-# OAuth Configuration (from environment variables or Streamlit secrets)
-# Safely check for secrets without throwing error if file doesn't exist
-try:
-    # Try to access Streamlit secrets (works in Streamlit Cloud)
-    CLIENT_ID = st.secrets["SF_CLIENT_ID"]
-    CLIENT_SECRET = st.secrets["SF_CLIENT_SECRET"]
-    REDIRECT_URI = st.secrets["SF_REDIRECT_URI"]
-except (KeyError, FileNotFoundError):
-    # Fall back to environment variables (local development)
-    CLIENT_ID = os.getenv('SF_CLIENT_ID', '')
-    CLIENT_SECRET = os.getenv('SF_CLIENT_SECRET', '')
-    REDIRECT_URI = os.getenv('SF_REDIRECT_URI', 'http://localhost:8501/')
+def load_org_credentials():
+    """Load all Salesforce org credentials from secrets or env vars."""
+    orgs = {}
+    
+    try:
+        # Try to access Streamlit secrets (works in Streamlit Cloud)
+        secrets_dict = dict(st.secrets)
+        
+        # Check for multiple org configurations (ORG1_, ORG2_, etc.)
+        org_prefixes = set()
+        for key in secrets_dict.keys():
+            if key.startswith('ORG') and '_CLIENT_ID' in key:
+                prefix = key.replace('_CLIENT_ID', '')
+                org_prefixes.add(prefix)
+        
+        # Load credentials for each org
+        if org_prefixes:
+            for prefix in sorted(org_prefixes):
+                try:
+                    org_name = st.secrets.get(f"{prefix}_NAME", prefix.replace('_', ' '))
+                    orgs[org_name] = {
+                        'client_id': st.secrets[f"{prefix}_CLIENT_ID"],
+                        'client_secret': st.secrets[f"{prefix}_CLIENT_SECRET"],
+                        'redirect_uri': st.secrets.get(f"{prefix}_REDIRECT_URI", st.secrets.get("SF_REDIRECT_URI", "https://salesforce-release-analyser.streamlit.app/"))
+                    }
+                except KeyError:
+                    continue
+        
+        # Fall back to legacy single-org format if no ORGx_ prefixes found
+        if not orgs:
+            try:
+                orgs['Default Org'] = {
+                    'client_id': st.secrets["SF_CLIENT_ID"],
+                    'client_secret': st.secrets["SF_CLIENT_SECRET"],
+                    'redirect_uri': st.secrets["SF_REDIRECT_URI"]
+                }
+            except KeyError:
+                pass
+    
+    except (KeyError, FileNotFoundError, AttributeError):
+        # Fall back to environment variables (local development)
+        pass
+    
+    # Also check environment variables
+    if not orgs:
+        client_id = os.getenv('SF_CLIENT_ID', '')
+        client_secret = os.getenv('SF_CLIENT_SECRET', '')
+        redirect_uri = os.getenv('SF_REDIRECT_URI', 'http://localhost:8501/')
+        
+        if client_id and client_secret:
+            orgs['Default Org'] = {
+                'client_id': client_id,
+                'client_secret': client_secret,
+                'redirect_uri': redirect_uri
+            }
+    
+    return orgs
+
+# Load all available org credentials
+AVAILABLE_ORGS = load_org_credentials()
+
+# Legacy single-org variables (for backward compatibility)
+if AVAILABLE_ORGS:
+    first_org = list(AVAILABLE_ORGS.values())[0]
+    CLIENT_ID = first_org['client_id']
+    CLIENT_SECRET = first_org['client_secret']
+    REDIRECT_URI = first_org['redirect_uri']
+else:
+    CLIENT_ID = ''
+    CLIENT_SECRET = ''
+    REDIRECT_URI = 'http://localhost:8501/'
 
 # Page config
 st.set_page_config(
@@ -137,6 +197,9 @@ if 'refresh_token' not in st.session_state:
 if 'oauth_session_id' not in st.session_state:
     # Generate unique session ID for this user's OAuth flow
     st.session_state.oauth_session_id = secrets_module.token_urlsafe(16)
+if 'selected_org' not in st.session_state:
+    # Default to first org if multiple available
+    st.session_state.selected_org = list(AVAILABLE_ORGS.keys())[0] if AVAILABLE_ORGS else None
 
 # Custom CSS
 st.markdown("""
@@ -277,20 +340,27 @@ if 'code' in query_params and not st.session_state.authenticated:
             is_sandbox = (state == 'sandbox')
             session_id = st.session_state.oauth_session_id
         
-        # Load PKCE verifier from file storage
-        code_verifier = load_pkce_verifier(session_id)
+        # Load PKCE verifier and org name from file storage
+        code_verifier, org_name = load_pkce_verifier(session_id)
         
         if not code_verifier:
             st.error("❌ OAuth session expired or invalid. Please log in again.")
             st.query_params.clear()
             st.rerun()
         
+        # Get credentials for the org that was selected during login
+        if org_name and org_name in AVAILABLE_ORGS:
+            org_creds = AVAILABLE_ORGS[org_name]
+        else:
+            # Fall back to first org if org_name not found
+            org_creds = AVAILABLE_ORGS[list(AVAILABLE_ORGS.keys())[0]]
+        
         with st.spinner("🔐 Authenticating with Salesforce..."):
             token_response = exchange_code_for_token(
                 code=code,
-                client_id=CLIENT_ID,
-                client_secret=CLIENT_SECRET,
-                redirect_uri=REDIRECT_URI,
+                client_id=org_creds['client_id'],
+                client_secret=org_creds['client_secret'],
+                redirect_uri=org_creds['redirect_uri'],
                 is_sandbox=is_sandbox,
                 code_verifier=code_verifier
             )
@@ -299,6 +369,7 @@ if 'code' in query_params and not st.session_state.authenticated:
             st.session_state.instance_url = token_response['instance_url']
             st.session_state.refresh_token = token_response.get('refresh_token')
             st.session_state.authenticated = True
+            st.session_state.selected_org = org_name  # Store which org was used
             
             st.query_params.clear()
             st.rerun()
@@ -349,8 +420,18 @@ if not st.session_state.authenticated:
     
     # Debug info (helpful for troubleshooting)
     with st.expander("🔍 OAuth Debug Info"):
-        st.code(f"Redirect URI: {REDIRECT_URI}")
-        st.code(f"Client ID: {CLIENT_ID[:20]}...{CLIENT_ID[-10:]}")
+        if len(AVAILABLE_ORGS) > 1:
+            st.info(f"**Multiple orgs configured:** {len(AVAILABLE_ORGS)} organizations available")
+            for org_name in AVAILABLE_ORGS.keys():
+                st.caption(f"• {org_name}")
+        
+        # Show info for currently selected org (or first org if none selected)
+        debug_org = st.session_state.selected_org if st.session_state.selected_org in AVAILABLE_ORGS else list(AVAILABLE_ORGS.keys())[0]
+        debug_creds = AVAILABLE_ORGS.get(debug_org, {})
+        
+        st.markdown(f"**Selected Org:** {debug_org}")
+        st.code(f"Redirect URI: {debug_creds.get('redirect_uri', 'N/A')}")
+        st.code(f"Client ID: {debug_creds.get('client_id', 'N/A')[:20]}...{debug_creds.get('client_id', 'N/A')[-10:]}")
         st.info("⚠️ Make sure this EXACT redirect URI is in your Salesforce Connected App Callback URLs")
     
     # Login options
@@ -362,14 +443,32 @@ if not st.session_state.authenticated:
         
         st.markdown("")  # Spacing
         
+        # Multi-org selector (if multiple orgs configured)
+        if len(AVAILABLE_ORGS) > 1:
+            st.markdown("**Select Organization:**")
+            selected_org = st.selectbox(
+                "Choose which Salesforce org to connect:",
+                options=list(AVAILABLE_ORGS.keys()),
+                index=list(AVAILABLE_ORGS.keys()).index(st.session_state.selected_org) if st.session_state.selected_org in AVAILABLE_ORGS else 0,
+                key="org_selector"
+            )
+            st.session_state.selected_org = selected_org
+            st.markdown("")  # Spacing
+        
+        # Get credentials for selected org
+        selected_org_creds = AVAILABLE_ORGS.get(st.session_state.selected_org, AVAILABLE_ORGS[list(AVAILABLE_ORGS.keys())[0]])
+        org_client_id = selected_org_creds['client_id']
+        org_client_secret = selected_org_creds['client_secret']
+        org_redirect_uri = selected_org_creds['redirect_uri']
+        
         # Production login - generate fresh PKCE pair and save verifier
         prod_verifier, prod_challenge = generate_pkce_pair()
         session_id = st.session_state.oauth_session_id
-        save_pkce_verifier(f"{session_id}_prod", prod_verifier)
+        save_pkce_verifier(f"{session_id}_prod", prod_verifier, st.session_state.selected_org)
         
         prod_auth_url = get_authorization_url(
-            client_id=CLIENT_ID,
-            redirect_uri=REDIRECT_URI,
+            client_id=org_client_id,
+            redirect_uri=org_redirect_uri,
             is_sandbox=False,
             code_challenge=prod_challenge,
             state=f"{session_id}_prod:production"
@@ -399,11 +498,11 @@ if not st.session_state.authenticated:
         
         # Sandbox login - generate fresh PKCE pair and save verifier
         sandbox_verifier, sandbox_challenge = generate_pkce_pair()
-        save_pkce_verifier(f"{session_id}_sandbox", sandbox_verifier)
+        save_pkce_verifier(f"{session_id}_sandbox", sandbox_verifier, st.session_state.selected_org)
         
         sandbox_auth_url = get_authorization_url(
-            client_id=CLIENT_ID,
-            redirect_uri=REDIRECT_URI,
+            client_id=org_client_id,
+            redirect_uri=org_redirect_uri,
             is_sandbox=True,
             code_challenge=sandbox_challenge,
             state=f"{session_id}_sandbox:sandbox"
