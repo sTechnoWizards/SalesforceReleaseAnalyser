@@ -18,7 +18,8 @@ from salesforce_client import (
     SalesforceOrgScanner,
     get_authorization_url,
     exchange_code_for_token,
-    revoke_token
+    revoke_token,
+    generate_pkce_pair
 )
 from ai_analyzer import AIAnalyzer
 from pattern_matcher import PatternMatcher
@@ -328,11 +329,12 @@ if 'error' in query_params:
 if 'code' in query_params and not st.session_state.authenticated:
     try:
         code = query_params['code']
-        # State parameter format: "org_type|org_name" e.g. "sandbox|BFHL UAT"
+        # State format: "org_type|org_name|code_verifier" — verifier travels in state to avoid file storage
         state = query_params.get('state', '')
-        parts = state.split('|', 1)
-        org_type = parts[0] if parts else ''
+        parts = state.split('|', 2)
+        org_type = parts[0] if len(parts) > 0 else ''
         org_name = parts[1] if len(parts) > 1 else ''
+        code_verifier = parts[2] if len(parts) > 2 else None
         is_sandbox = (org_type == 'sandbox')
 
         # Get credentials for the org that was selected during login
@@ -348,7 +350,8 @@ if 'code' in query_params and not st.session_state.authenticated:
                 client_id=org_creds['client_id'],
                 client_secret=org_creds['client_secret'],
                 redirect_uri=org_creds['redirect_uri'],
-                is_sandbox=is_sandbox
+                is_sandbox=is_sandbox,
+                code_verifier=code_verifier
             )
             
             st.session_state.access_token = token_response['access_token']
@@ -442,11 +445,13 @@ if not st.session_state.authenticated:
         org_client_secret = selected_org_creds['client_secret']
         org_redirect_uri = selected_org_creds['redirect_uri']
         
+        prod_verifier, prod_challenge = generate_pkce_pair()
         prod_auth_url = get_authorization_url(
             client_id=org_client_id,
             redirect_uri=org_redirect_uri,
             is_sandbox=False,
-            state=f"production|{st.session_state.selected_org}"
+            code_challenge=prod_challenge,
+            state=f"production|{st.session_state.selected_org}|{prod_verifier}"
         )
         
         # Create button that opens in same window
@@ -471,11 +476,13 @@ if not st.session_state.authenticated:
         
         st.markdown("")  # Spacing
         
+        sandbox_verifier, sandbox_challenge = generate_pkce_pair()
         sandbox_auth_url = get_authorization_url(
             client_id=org_client_id,
             redirect_uri=org_redirect_uri,
             is_sandbox=True,
-            state=f"sandbox|{st.session_state.selected_org}"
+            code_challenge=sandbox_challenge,
+            state=f"sandbox|{st.session_state.selected_org}|{sandbox_verifier}"
         )
         
         # Create button that opens in same window
