@@ -18,8 +18,7 @@ from salesforce_client import (
     SalesforceOrgScanner,
     get_authorization_url,
     exchange_code_for_token,
-    revoke_token,
-    generate_pkce_pair
+    revoke_token
 )
 from ai_analyzer import AIAnalyzer
 from pattern_matcher import PatternMatcher
@@ -329,25 +328,13 @@ if 'error' in query_params:
 if 'code' in query_params and not st.session_state.authenticated:
     try:
         code = query_params['code']
-        # State parameter format: "sessionID:org_type" where org_type is "production" or "sandbox"
+        # State parameter format: "org_type|org_name" e.g. "sandbox|BFHL UAT"
         state = query_params.get('state', '')
-        
-        if ':' in state:
-            session_id, org_type = state.split(':', 1)
-            is_sandbox = (org_type == 'sandbox')
-        else:
-            # Fallback for old format
-            is_sandbox = (state == 'sandbox')
-            session_id = st.session_state.oauth_session_id
-        
-        # Load PKCE verifier and org name from file storage
-        code_verifier, org_name = load_pkce_verifier(session_id)
-        
-        if not code_verifier:
-            st.error("❌ OAuth session expired or invalid. Please log in again.")
-            st.query_params.clear()
-            st.rerun()
-        
+        parts = state.split('|', 1)
+        org_type = parts[0] if parts else ''
+        org_name = parts[1] if len(parts) > 1 else ''
+        is_sandbox = (org_type == 'sandbox')
+
         # Get credentials for the org that was selected during login
         if org_name and org_name in AVAILABLE_ORGS:
             org_creds = AVAILABLE_ORGS[org_name]
@@ -361,8 +348,7 @@ if 'code' in query_params and not st.session_state.authenticated:
                 client_id=org_creds['client_id'],
                 client_secret=org_creds['client_secret'],
                 redirect_uri=org_creds['redirect_uri'],
-                is_sandbox=is_sandbox,
-                code_verifier=code_verifier
+                is_sandbox=is_sandbox
             )
             
             st.session_state.access_token = token_response['access_token']
@@ -376,11 +362,6 @@ if 'code' in query_params and not st.session_state.authenticated:
     except Exception as e:
         st.error(f"❌ Authentication failed: {str(e)}")
         st.info("🔄 Please try logging in again.")
-
-        verifier_prod, challenge_prod = generate_pkce_pair()
-        st.session_state.pkce_prod = {'verifier': verifier_prod, 'challenge': challenge_prod}
-        verifier_sandbox, challenge_sandbox = generate_pkce_pair()
-        st.session_state.pkce_sandbox = {'verifier': verifier_sandbox, 'challenge': challenge_sandbox}
         st.session_state.authenticated = False
 
 # Show login screen if not authenticated
@@ -461,17 +442,11 @@ if not st.session_state.authenticated:
         org_client_secret = selected_org_creds['client_secret']
         org_redirect_uri = selected_org_creds['redirect_uri']
         
-        # Production login - generate fresh PKCE pair and save verifier
-        prod_verifier, prod_challenge = generate_pkce_pair()
-        session_id = st.session_state.oauth_session_id
-        save_pkce_verifier(f"{session_id}_prod", prod_verifier, st.session_state.selected_org)
-        
         prod_auth_url = get_authorization_url(
             client_id=org_client_id,
             redirect_uri=org_redirect_uri,
             is_sandbox=False,
-            code_challenge=prod_challenge,
-            state=f"{session_id}_prod:production"
+            state=f"production|{st.session_state.selected_org}"
         )
         
         # Create button that opens in same window
@@ -496,16 +471,11 @@ if not st.session_state.authenticated:
         
         st.markdown("")  # Spacing
         
-        # Sandbox login - generate fresh PKCE pair and save verifier
-        sandbox_verifier, sandbox_challenge = generate_pkce_pair()
-        save_pkce_verifier(f"{session_id}_sandbox", sandbox_verifier, st.session_state.selected_org)
-        
         sandbox_auth_url = get_authorization_url(
             client_id=org_client_id,
             redirect_uri=org_redirect_uri,
             is_sandbox=True,
-            code_challenge=sandbox_challenge,
-            state=f"{session_id}_sandbox:sandbox"
+            state=f"sandbox|{st.session_state.selected_org}"
         )
         
         # Create button that opens in same window
@@ -634,6 +604,9 @@ with st.sidebar:
     provider_key = "gemini" if "Gemini" in ai_provider else "openai"
     
     # API Key Input (dynamic based on provider)
+    base_url = None
+    model_name = None
+    
     if provider_key == "gemini":
         api_key = st.text_input(
             "Gemini API Key",
@@ -652,12 +625,22 @@ with st.sidebar:
             "OpenAI API Key",
             type="password",
             value=os.getenv('OPENAI_API_KEY', ''),
-            help="API key from platform.openai.com"
+            help="API key for OpenAI-compatible gateway"
+        )
+        base_url = st.text_input(
+            "Gateway Base URL",
+            value=os.getenv('OPENAI_BASE_URL', 'https://ai-gateway-uat.healthrx.co.in/v1'),
+            help="Base URL for AI gateway (include /v1 suffix)"
+        )
+        model_name = st.text_input(
+            "Model Name",
+            value=os.getenv('OPENAI_MODEL', 'gpt-5.4-pro'),
+            help="Model identifier on the gateway"
         )
         st.markdown("""
         <small>
-        📌 <a href="https://platform.openai.com/" target="_blank">Get OpenAI API key</a><br>
-        💡 Uses gpt-4o-mini (fast and cost-effective)
+        📌 AI Gateway (OpenAI-compatible)<br>
+        💡 Uses custom gateway with configurable model
         </small>
         """, unsafe_allow_html=True)
     
@@ -989,7 +972,12 @@ with tab1:
             status_text.text(f"🤖 AI ({ai_provider}) performing comprehensive release analysis...")
             progress_bar.progress(50)
             
-            ai_analyzer = AIAnalyzer(api_key, provider=provider_key)
+            ai_analyzer = AIAnalyzer(
+                api_key,
+                provider=provider_key,
+                base_url=base_url if provider_key == 'openai' else None,
+                model_name=model_name if provider_key == 'openai' else None
+            )
             page_map = st.session_state.get('page_map', None)
             release_analysis = ai_analyzer.analyze_comprehensive_release(release_text, page_map)
             
