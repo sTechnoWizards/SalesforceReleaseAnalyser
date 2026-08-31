@@ -71,13 +71,15 @@ class AIAnalyzer:
         
         return analysis
     
-    def __init__(self, api_key, provider='gemini'):
+    def __init__(self, api_key, provider='gemini', base_url=None, model_name=None):
         """
         Initialize AI with deterministic settings
         
         Args:
-            api_key: API key (Gemini from ai.google.dev or OpenAI from platform.openai.com)
+            api_key: API key (Gemini from ai.google.dev or OpenAI-compatible gateway)
             provider: 'gemini' or 'openai'
+            base_url: Custom base URL for OpenAI-compatible gateways (e.g. https://ai-gateway-uat.healthrx.co.in/v1)
+            model_name: Override default model name (e.g. 'gemini/gemini-3-flash-preview')
         """
         self.provider = provider.lower()
         self.api_key = api_key
@@ -93,18 +95,25 @@ class AIAnalyzer:
             }
             
             self.model = genai.GenerativeModel(
-                'gemini-1.5-flash',
+                'gemini-2.5-flash',
                 generation_config=generation_config
             )
-            print("✅ Gemini AI initialized with 100% deterministic settings")
+            print("✅ Gemini AI initialized with gemini-2.5-flash")
             
         elif self.provider == 'openai':
             if not OPENAI_AVAILABLE:
                 raise ImportError("OpenAI package not installed. Run: pip install openai")
             
-            self.client = OpenAI(api_key=api_key)
-            self.model_name = 'gpt-4o-mini'  # Fast and cost-effective
-            print(f"✅ OpenAI initialized with {self.model_name}")
+            # Support custom base URL for OpenAI-compatible gateways
+            client_kwargs = {'api_key': api_key}
+            if base_url:
+                client_kwargs['base_url'] = base_url
+            
+            self.client = OpenAI(**client_kwargs)
+            self.model_name = model_name or 'gpt-5.4-pro'
+            print(f"✅ OpenAI-compatible client initialized with model: {self.model_name}")
+            if base_url:
+                print(f"   Gateway URL: {base_url}")
         
         else:
             raise ValueError(f"Unsupported provider: {provider}. Use 'gemini' or 'openai'")
@@ -144,11 +153,9 @@ class AIAnalyzer:
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[
-                    {"role": "system", "content": "You are a Salesforce release notes analyzer. Provide accurate, structured analysis in JSON format."},
+                    {"role": "system", "content": "You are a Salesforce release notes analyzer. Provide accurate, structured analysis in JSON format. Return ONLY valid JSON, no markdown."},
                     {"role": "user", "content": prompt}
-                ],
-                temperature=0.0,  # Deterministic
-                response_format={"type": "json_object"}  # Force JSON output
+                ]
             )
             return response.choices[0].message.content
         
@@ -157,7 +164,7 @@ class AIAnalyzer:
     
     def analyze_comprehensive_release(self, release_notes_text, page_map=None):
         """
-        Comprehensive release notes analysis with confidence scores and source attribution
+        Comprehensive release notes analysis with chunked processing for large documents
         
         Args:
             release_notes_text: Full text of release notes
@@ -170,13 +177,17 @@ class AIAnalyzer:
         print("🤖 AI COMPREHENSIVE ANALYSIS STARTING")
         print("="*60)
         
-        # Create cache key from content hash
-        text_sample = release_notes_text[:500000]
-        cache_key = hashlib.md5(text_sample.encode()).hexdigest()
+        # Create cache key from FULL content hash
+        cache_key = hashlib.md5(release_notes_text.encode()).hexdigest()
+        
+        total_chars = len(release_notes_text)
+        chunk_size = 100000  # 100K chars per chunk (~25K tokens, cost-effective)
+        num_chunks = max(1, (total_chars + chunk_size - 1) // chunk_size)
         
         print(f"📊 Analysis Info:")
-        print(f"   - Total text length: {len(release_notes_text):,} chars")
-        print(f"   - Analyzing first: {len(text_sample):,} chars (500KB limit)")
+        print(f"   - Total text length: {total_chars:,} chars")
+        print(f"   - Chunk size: {chunk_size:,} chars")
+        print(f"   - Chunks to process: {num_chunks}")
         print(f"   - Cache key: {cache_key[:20]}...")
         
         # Check cache first for consistency
@@ -186,14 +197,93 @@ class AIAnalyzer:
         
         print("\n🤖 AI performing comprehensive release analysis...")
         
-        # Process up to 500K chars (can handle large PDFs up to 60MB text content)
-        text = text_sample
-        total_chars = len(release_notes_text)
-        coverage_pct = min(100, (len(text) / max(total_chars, 1)) * 100)
-        print(f"   📄 Processing {len(text):,} of {total_chars:,} characters ({coverage_pct:.1f}% coverage)")
+        # Process in chunks
+        all_breaking_changes = []
+        all_new_features = []
+        all_general_changes = []
+        all_recommendations = []
+        summaries = []
+        all_sections = []
+        
+        for i in range(num_chunks):
+            start = i * chunk_size
+            end = min(start + chunk_size, total_chars)
+            chunk_text = release_notes_text[start:end]
+            
+            print(f"\n   📄 Processing chunk {i+1}/{num_chunks} ({start:,}-{end:,} chars, {len(chunk_text):,} chars)")
+            
+            chunk_analysis = self._analyze_chunk(chunk_text, i+1, num_chunks)
+            
+            if chunk_analysis:
+                all_breaking_changes.extend(chunk_analysis.get('breakingChanges', []))
+                all_new_features.extend(chunk_analysis.get('newFeatures', []))
+                all_general_changes.extend(chunk_analysis.get('generalChanges', []))
+                all_recommendations.extend(chunk_analysis.get('recommendations', []))
+                if chunk_analysis.get('summary'):
+                    summaries.append(chunk_analysis['summary'])
+                all_sections.extend(chunk_analysis.get('metadata', {}).get('sectionsAnalyzed', []))
+        
+        # Deduplicate by searchKeyword/feature name
+        breaking_changes = self._deduplicate_items(all_breaking_changes, 'searchKeyword')
+        new_features = self._deduplicate_items(all_new_features, 'feature')
+        general_changes = self._deduplicate_items(all_general_changes, 'change')
+        recommendations = list(set(all_recommendations))
+        
+        # Merge summary
+        summary = summaries[0] if summaries else "Unable to analyze release notes"
+        if len(summaries) > 1:
+            summary = " ".join(summaries[:2])  # Combine first two chunk summaries
+        
+        analysis = {
+            "summary": summary,
+            "breakingChanges": breaking_changes,
+            "newFeatures": new_features,
+            "generalChanges": general_changes,
+            "recommendations": recommendations,
+            "metadata": {
+                "sectionsAnalyzed": list(set(all_sections)),
+                "coverageEstimate": "100%",
+                "chunksProcessed": num_chunks,
+                "totalCharsAnalyzed": total_chars
+            }
+        }
+        
+        print(f"\n   ✅ MERGED RESULTS:")
+        print(f"   ✅ Breaking Changes: {len(breaking_changes)}")
+        print(f"   ✅ New Features: {len(new_features)}")
+        print(f"   ✅ General Changes: {len(general_changes)}")
+        
+        # Validate critical patterns
+        print("   🔍 Validating critical patterns...")
+        analysis = self._validate_critical_patterns(release_notes_text[:500000], analysis)
+        
+        # Cache the results for consistency
+        self._analysis_cache[cache_key] = analysis
+        self._save_cache()
+        print("💾 Results cached for consistency (saved to disk)")
+        
+        return analysis
+    
+    def _deduplicate_items(self, items, key_field):
+        """Remove duplicates based on a key field"""
+        seen = set()
+        unique = []
+        for item in items:
+            key = item.get(key_field, '').lower().strip()
+            if key and key not in seen:
+                seen.add(key)
+                unique.append(item)
+            elif not key:
+                unique.append(item)
+        return unique
+    
+    def _analyze_chunk(self, text, chunk_num, total_chunks):
+        """Analyze a single chunk of release notes text"""
+        
+        chunk_context = f"(Chunk {chunk_num} of {total_chunks})" if total_chunks > 1 else ""
         
         prompt = f"""
-You are analyzing Salesforce release notes. Extract ALL significant information comprehensively and CONSISTENTLY.
+You are analyzing Salesforce release notes {chunk_context}. Extract ALL significant information comprehensively and CONSISTENTLY.
 
 CRITICAL: You must extract the SAME information every time you analyze this document. Do not randomly omit items.
 
@@ -210,12 +300,6 @@ Extract and categorize EVERYTHING you find:
 5. **RECOMMENDATIONS**: Best practices for adoption
 
 CONSISTENCY RULE: Always extract ALL items you find. Do not randomly skip items between runs.
-
-1. **EXECUTIVE SUMMARY**: 2-3 sentence overview
-2. **BREAKING CHANGES**: ALL deprecated/removed/changed functionality (aim for 10-30 items)
-3. **NEW FEATURES**: ALL new capabilities (aim for 20-50 features)
-4. **GENERAL CHANGES**: ALL updates, enhancements, improvements (aim for 10-30 items)
-5. **RECOMMENDATIONS**: Best practices for adoption
 
 **Breaking Changes Format:**
 {{
@@ -271,17 +355,17 @@ Return ONLY valid JSON, no markdown:
   }}
 }}
 
-Release Notes Text (first 500K chars):
+Release Notes Text {chunk_context}:
 {text}
 """
         
         try:
-            print(f"   🤖 Sending prompt to {self.provider.title()} AI...")
+            print(f"   🤖 Sending chunk {chunk_num} to {self.provider.title()} AI...")
             print(f"   📝 Prompt length: {len(prompt):,} chars")
             
             response_text = self._generate_response(prompt)
             
-            print("   ✅ Received response from AI")
+            print(f"   ✅ Received response for chunk {chunk_num}")
             print(f"   📄 Response length: {len(response_text):,} chars")
             
             result_text = response_text.strip()
@@ -299,55 +383,20 @@ Release Notes Text (first 500K chars):
             # Parse JSON
             analysis = json.loads(result_text)
             
-            print(f"   ✅ Summary: {analysis.get('summary', 'N/A')[:100]}...")
-            print(f"   ✅ Breaking Changes: {len(analysis.get('breakingChanges', []))}")
-            print(f"   ✅ New Features: {len(analysis.get('newFeatures', []))}")
-            print(f"   ✅ General Changes: {len(analysis.get('generalChanges', []))}")
-            
-            # Validate critical patterns before caching
-            print("   🔍 Validating critical patterns...")
-            analysis = self._validate_critical_patterns(text_sample, analysis)
-            
-            # Cache the results for consistency
-            self._analysis_cache[cache_key] = analysis
-            self._save_cache()  # Persist to disk
-            print("💾 Results cached for consistency (saved to disk)")
+            print(f"   ✅ Chunk {chunk_num} - Breaking Changes: {len(analysis.get('breakingChanges', []))}")
+            print(f"   ✅ Chunk {chunk_num} - New Features: {len(analysis.get('newFeatures', []))}")
+            print(f"   ✅ Chunk {chunk_num} - General Changes: {len(analysis.get('generalChanges', []))}")
             
             return analysis
         
         except json.JSONDecodeError as e:
-            print(f"\n❌ JSON PARSING ERROR")
-            print(f"Error Type: {type(e).__name__}")
-            print(f"Error Message: {str(e)}")
-            print(f"Error Position: Line {e.lineno}, Column {e.colno}")
-            print(f"\n📄 Raw AI Response (first 1000 chars):")
-            print("=" * 60)
-            print(response.text[:1000])
-            print("=" * 60)
-            print("\n💡 This usually means:")
-            print("   - AI returned markdown instead of pure JSON")
-            print("   - Response is incomplete or malformed")
-            print("   - PDF content is too complex for AI to parse")
-            return self._get_empty_analysis()
-            
-        except AttributeError as e:
-            print(f"\n❌ AI RESPONSE ERROR")
+            print(f"\n❌ JSON PARSING ERROR in chunk {chunk_num}")
             print(f"Error: {str(e)}")
-            print(f"💡 The AI might have blocked the request or failed to respond")
-            print(f"   - Check your Gemini API key is valid")
-            print(f"   - Ensure you haven't hit rate limits")
+            print(f"Response preview: {response_text[:500] if 'response_text' in dir() else 'N/A'}")
             return self._get_empty_analysis()
             
         except Exception as e:
-            print(f"\n❌ UNEXPECTED ERROR in AI Analysis")
-            print(f"Error Type: {type(e).__name__}")
-            print(f"Error Message: {str(e)}")
-            print(f"\n📊 Debug Info:")
-            print(f"   - Text sample length: {len(text_sample):,} chars")
-            print(f"   - Cache key: {cache_key[:20]}...")
-            import traceback
-            print(f"\n🔍 Full stack trace:")
-            traceback.print_exc()
+            print(f"\n❌ ERROR in chunk {chunk_num}: {type(e).__name__}: {str(e)}")
             return self._get_empty_analysis()
     
     def clear_cache(self):

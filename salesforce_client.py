@@ -251,7 +251,11 @@ class SalesforceOrgScanner:
             
             # Handle pagination
             while not result['done']:
-                result = self.sf.tooling.query_more(result['nextRecordsUrl'], identifier_is_url=True)
+                next_url = result['nextRecordsUrl']
+                # Strip leading /services/data/vXX.X/ if present
+                if next_url.startswith('/services/data/'):
+                    next_url = next_url.split('/', 4)[-1]
+                result = self.sf.restful(next_url)
                 all_records.extend(result['records'])
             
             print(f"   Found {len(all_records)} LWC components...")
@@ -323,7 +327,11 @@ class SalesforceOrgScanner:
             
             # Handle pagination
             while not result['done']:
-                result = self.sf.tooling.query_more(result['nextRecordsUrl'], identifier_is_url=True)
+                next_url = result['nextRecordsUrl']
+                # Strip leading /services/data/vXX.X/ if present
+                if next_url.startswith('/services/data/'):
+                    next_url = next_url.split('/', 4)[-1]
+                result = self.sf.restful(next_url)
                 all_records.extend(result['records'])
             
             print(f"   Processing {len(all_records)} active flows...")
